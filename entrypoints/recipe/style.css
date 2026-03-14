@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* ── CSS variable theming — toggled by adding .dark to <html> ── */
+:root {
+  --bg:           #fafaf8;
+  --fg:           #1a1a1a;
+  --card:         #ffffff;
+  --border:       #e8e8e4;
+  --muted:        #888888;
+  --muted-bg:     #f0f0ec;
+  --accent:       #4f46e5;
+  --primary:      #1a1a1a;
+  --primary-fg:   #ffffff;
+}
+
+html.dark {
+  --bg:           #111110;
+  --fg:           #f0efe9;
+  --card:         #1c1b18;
+  --border:       #2e2d29;
+  --muted:        #888888;
+  --muted-bg:     #242320;
+  --accent:       #818cf8;
+  --primary:      #f0efe9;
+  --primary-fg:   #111110;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+/* Responsive two-column layout for ingredients/steps */
+.recipe-sections {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 3.5rem;
+}
+
+@media (max-width: 640px) {
+  .recipe-sections {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+}

@@ -1,8 +1,11 @@
-import { extractRecipe } from '../utils/extractRecipe';
+import { extractRecipe, type Recipe } from '../utils/extractRecipe';
 
 // Temporary key verification — remove after debugging
 console.log('[kaiCook] VITE_ANTHROPIC_API_KEY (first 20):', (import.meta.env.VITE_ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
 console.log('[kaiCook] ANTHROPIC_API_KEY (first 20):', (import.meta.env.ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
+
+// In-memory recipe cache keyed by tabId. Cleared when the tab navigates to a new URL.
+const recipeCache = new Map<number, Recipe>();
 
 async function ensureContentScript(tabId: number): Promise<void> {
   try {
@@ -21,6 +24,14 @@ async function ensureContentScript(tabId: number): Promise<void> {
 }
 
 export default defineBackground(() => {
+  // Evict cache when a tab navigates to a new URL so stale recipes are never served.
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.url) {
+      recipeCache.delete(tabId);
+      console.log('[kaiCook] Cache cleared for tab', tabId, 'due to navigation');
+    }
+  });
+
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'GET_TAB_URL') {
       browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
@@ -54,6 +65,16 @@ export default defineBackground(() => {
         try {
           await ensureContentScript(tabId);
 
+          // Cache hit — skip API call and open the recipe tab immediately
+          const cached = recipeCache.get(tabId);
+          if (cached) {
+            console.log('[kaiCook] Cache hit for tab', tabId, '— skipping API call');
+            await browser.storage.session.set({ recipe: cached, recipeSourceUrl: tab.url ?? '' });
+            browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
+            sendResponse({ recipe: cached });
+            return;
+          }
+
           console.log('[kaiCook] Sending GET_PAGE_TEXT to content script…');
           const contentResponse = await browser.tabs.sendMessage(tabId, { type: 'GET_PAGE_TEXT' });
           console.log('[kaiCook] Content script response received:', {
@@ -72,9 +93,11 @@ export default defineBackground(() => {
           const recipe = await extractRecipe(pageText);
           console.log('[kaiCook] Recipe extracted successfully:', recipe);
 
-          // Forward recipe to content script to render the overlay
-          console.log('[kaiCook] Sending SHOW_OVERLAY to content script…');
-          await browser.tabs.sendMessage(tabId, { type: 'SHOW_OVERLAY', recipe });
+          recipeCache.set(tabId, recipe);
+
+          // Store in session storage and open the dedicated recipe tab
+          await browser.storage.session.set({ recipe, recipeSourceUrl: tab.url ?? '' });
+          browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
 
           sendResponse({ recipe });
         } catch (err) {

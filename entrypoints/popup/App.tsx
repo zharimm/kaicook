@@ -50,7 +50,10 @@ function App() {
       <h2 style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>kaiCook</h2>
 
       {state.status === 'loading' && (
-        <p style={{ color: '#666', fontSize: '0.9rem' }}>Extracting recipe…</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <div className="w-6 h-6 rounded-full border-2 border-gray-600 border-t-white animate-spin" />
+          <p style={{ color: '#666', fontSize: '0.9rem', margin: 0 }}>Extracting recipe…</p>
+        </div>
       )}
 
       {state.status === 'error' && (
@@ -59,43 +62,10 @@ function App() {
 
       {state.status === 'done' && (
         <div>
-          <p style={{ margin: '0 0 0.75rem', fontSize: '0.75rem', color: '#888', letterSpacing: '0.04em' }}>
+          <p style={{ margin: '0 0 0.35rem', fontSize: '0.75rem', color: '#888', letterSpacing: '0.04em' }}>
             ✓ Recipe opened in tab
           </p>
-          <h3 style={{ margin: '0 0 0.5rem', fontSize: '1rem' }}>{state.recipe.title}</h3>
-
-          {state.recipe.description && (
-            <p style={{ margin: '0 0 0.75rem', fontSize: '0.82rem', color: '#555' }}>
-              {state.recipe.description}
-            </p>
-          )}
-
-          <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem', fontSize: '0.8rem', color: '#666' }}>
-            {state.recipe.servings > 0 && <span>Serves {state.recipe.servings}</span>}
-            {state.recipe.totalTime && <span>{state.recipe.totalTime}</span>}
-          </div>
-
-          <h4 style={{ margin: '0 0 0.4rem', fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Ingredients
-          </h4>
-          <ul style={{ margin: '0 0 0.75rem', paddingLeft: '1.2rem', fontSize: '0.85rem' }}>
-            {state.recipe.ingredients.map((ing, i) => (
-              <li key={i}>
-                {ing.quantity > 0 && `${ing.quantity} `}
-                {ing.unit && `${ing.unit} `}
-                {ing.name}
-              </li>
-            ))}
-          </ul>
-
-          <h4 style={{ margin: '0 0 0.4rem', fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Steps
-          </h4>
-          <ol style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.85rem' }}>
-            {state.recipe.steps.map((step, i) => (
-              <li key={i} style={{ marginBottom: '0.35rem' }}>{step}</li>
-            ))}
-          </ol>
+          <p style={{ margin: 0, fontSize: '0.95rem', fontWeight: 500 }}>{state.recipe.title}</p>
         </div>
       )}
     </div>
