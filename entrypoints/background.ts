@@ -89,6 +89,20 @@ export default defineBackground(() => {
             return;
           }
 
+          // Pre-check: count recipe signals in the first 500 chars of page text.
+          // Avoids burning an API call on pages that clearly aren't recipes.
+          const snippet = pageText.slice(0, 500).toLowerCase();
+          const SIGNALS = ['ingredients', 'instructions', 'steps', 'cook', 'bake', 'prep time', 'servings', 'recipe'];
+          const signalCount = SIGNALS.filter((kw) => snippet.includes(kw)).length;
+          if (signalCount < 2) {
+            const error = signalCount === 0
+              ? "Hey, nice website. But this page has zero calories. 🍽️"
+              : "Almost! This looks like a food site but I can't find a recipe here.";
+            console.warn('[kaiCook] Insufficient recipe signals (%d) — skipping API call', signalCount);
+            sendResponse({ error });
+            return;
+          }
+
           console.log('[kaiCook] Calling Anthropic API…');
           const recipe = await extractRecipe(pageText);
           console.log('[kaiCook] Recipe extracted successfully:', recipe);

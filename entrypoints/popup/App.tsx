@@ -19,7 +19,6 @@ function App() {
 
         if (!url || url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) {
           console.warn('[kaiCook] Unsupported URL, skipping extraction:', url);
-          setState({ status: 'error', message: 'Please navigate to a recipe page first.' });
           return;
         }
 
@@ -57,7 +56,7 @@ function App() {
       )}
 
       {state.status === 'error' && (
-        <p style={{ color: '#c00', fontSize: '0.85rem' }}>{state.message}</p>
+        <p className="text-gray-800" style={{ fontSize: '0.85rem' }}>{state.message}</p>
       )}
 
       {state.status === 'done' && (
