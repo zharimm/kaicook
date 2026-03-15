@@ -1,8 +1,11 @@
-import { extractRecipe } from '../utils/extractRecipe';
+import { extractRecipe, type Recipe } from '../utils/extractRecipe';
 
 // Temporary key verification — remove after debugging
 console.log('[kaiCook] VITE_ANTHROPIC_API_KEY (first 20):', (import.meta.env.VITE_ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
 console.log('[kaiCook] ANTHROPIC_API_KEY (first 20):', (import.meta.env.ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
+
+// In-memory recipe cache keyed by tabId. Cleared when the tab navigates to a new URL.
+const recipeCache = new Map<number, Recipe>();
 
 async function ensureContentScript(tabId: number): Promise<void> {
   try {
@@ -21,6 +24,14 @@ async function ensureContentScript(tabId: number): Promise<void> {
 }
 
 export default defineBackground(() => {
+  // Evict cache when a tab navigates to a new URL so stale recipes are never served.
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.url) {
+      recipeCache.delete(tabId);
+      console.log('[kaiCook] Cache cleared for tab', tabId, 'due to navigation');
+    }
+  });
+
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'GET_TAB_URL') {
       browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
@@ -30,9 +41,14 @@ export default defineBackground(() => {
         console.log('[kaiCook] tabs[0]:', JSON.stringify(tab));
         console.log('[kaiCook] tabs[0].url:', url, '— defined?', url !== null && url !== undefined);
         if (!url) {
-          console.warn('[kaiCook] url is undefined — extension may be missing the "tabs" permission, or the tab is a chrome:// page');
+          console.log('[kaiCook] url is undefined — extension may be missing the "tabs" permission, or the tab is a chrome:// page');
         }
-        sendResponse({ url });
+        if (url?.startsWith('chrome-extension://')) {
+          console.log('[kaiCook] Active tab is a chrome-extension:// page — returning kaicook flag');
+          sendResponse({ url, kaicook: true });
+        } else {
+          sendResponse({ url });
+        }
       });
       return true;
     }
@@ -46,13 +62,23 @@ export default defineBackground(() => {
         console.log('[kaiCook] Active tab:', { id: tabId, url: tab?.url, status: tab?.status });
 
         if (!tabId) {
-          console.error('[kaiCook] No active tab ID found');
+          console.log('[kaiCook] No active tab ID found');
           sendResponse({ error: 'No active tab found' });
           return;
         }
 
         try {
           await ensureContentScript(tabId);
+
+          // Cache hit — skip API call and open the recipe tab immediately
+          const cached = recipeCache.get(tabId);
+          if (cached) {
+            console.log('[kaiCook] Cache hit for tab', tabId, '— skipping API call');
+            await browser.storage.session.set({ recipe: cached, recipeSourceUrl: tab.url ?? '' });
+            browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
+            sendResponse({ recipe: cached });
+            return;
+          }
 
           console.log('[kaiCook] Sending GET_PAGE_TEXT to content script…');
           const contentResponse = await browser.tabs.sendMessage(tabId, { type: 'GET_PAGE_TEXT' });
@@ -63,8 +89,22 @@ export default defineBackground(() => {
 
           const pageText: string = contentResponse?.text ?? '';
           if (!pageText) {
-            console.error('[kaiCook] Page text is empty — content script may not be injected yet');
+            console.log('[kaiCook] Page text is empty — content script may not be injected yet');
             sendResponse({ error: 'Page text is empty. Try reloading the tab.' });
+            return;
+          }
+
+          // Pre-check: count recipe signals in the first 500 chars of page text.
+          // Avoids burning an API call on pages that clearly aren't recipes.
+          const snippet = pageText.slice(0, 500).toLowerCase();
+          const SIGNALS = ['ingredients', 'instructions', 'steps', 'cook', 'bake', 'prep time', 'servings', 'recipe'];
+          const signalCount = SIGNALS.filter((kw) => snippet.includes(kw)).length;
+          if (signalCount < 2) {
+            const error = signalCount === 0
+              ? "Hey, nice website. But this page has zero calories. 🍽️"
+              : "Almost! This looks like a food site but I can't find a recipe here.";
+            console.log('[kaiCook] Insufficient recipe signals (%d) — skipping API call', signalCount);
+            sendResponse({ error });
             return;
           }
 
@@ -72,9 +112,11 @@ export default defineBackground(() => {
           const recipe = await extractRecipe(pageText);
           console.log('[kaiCook] Recipe extracted successfully:', recipe);
 
-          // Forward recipe to content script to render the overlay
-          console.log('[kaiCook] Sending SHOW_OVERLAY to content script…');
-          await browser.tabs.sendMessage(tabId, { type: 'SHOW_OVERLAY', recipe });
+          recipeCache.set(tabId, recipe);
+
+          // Store in session storage and open the dedicated recipe tab
+          await browser.storage.session.set({ recipe, recipeSourceUrl: tab.url ?? '' });
+          browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
 
           sendResponse({ recipe });
         } catch (err) {
