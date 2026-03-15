@@ -46,3 +46,31 @@ body {
     gap: 2rem;
   }
 }
+
+@media print {
+  .no-print { display: none !important; }
+
+  /* Force white background and black text regardless of dark mode */
+  :root, html.dark {
+    --bg:         #ffffff;
+    --fg:         #111111;
+    --card:       #ffffff;
+    --border:     #cccccc;
+    --muted:      #555555;
+    --muted-bg:   #f5f5f5;
+    --primary:    #111111;
+    --primary-fg: #ffffff;
+    --accent:     #333333;
+  }
+
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Remove excessive top padding — page starts right at content */
+  .max-w-4xl {
+    padding-top: 1rem !important;
+    padding-bottom: 1rem !important;
+  }
+}

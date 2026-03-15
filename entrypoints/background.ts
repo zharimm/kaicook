@@ -41,9 +41,14 @@ export default defineBackground(() => {
         console.log('[kaiCook] tabs[0]:', JSON.stringify(tab));
         console.log('[kaiCook] tabs[0].url:', url, '— defined?', url !== null && url !== undefined);
         if (!url) {
-          console.warn('[kaiCook] url is undefined — extension may be missing the "tabs" permission, or the tab is a chrome:// page');
+          console.log('[kaiCook] url is undefined — extension may be missing the "tabs" permission, or the tab is a chrome:// page');
         }
-        sendResponse({ url });
+        if (url?.startsWith('chrome-extension://')) {
+          console.log('[kaiCook] Active tab is a chrome-extension:// page — returning kaicook flag');
+          sendResponse({ url, kaicook: true });
+        } else {
+          sendResponse({ url });
+        }
       });
       return true;
     }
@@ -57,7 +62,7 @@ export default defineBackground(() => {
         console.log('[kaiCook] Active tab:', { id: tabId, url: tab?.url, status: tab?.status });
 
         if (!tabId) {
-          console.error('[kaiCook] No active tab ID found');
+          console.log('[kaiCook] No active tab ID found');
           sendResponse({ error: 'No active tab found' });
           return;
         }
@@ -84,7 +89,7 @@ export default defineBackground(() => {
 
           const pageText: string = contentResponse?.text ?? '';
           if (!pageText) {
-            console.error('[kaiCook] Page text is empty — content script may not be injected yet');
+            console.log('[kaiCook] Page text is empty — content script may not be injected yet');
             sendResponse({ error: 'Page text is empty. Try reloading the tab.' });
             return;
           }
@@ -98,7 +103,7 @@ export default defineBackground(() => {
             const error = signalCount === 0
               ? "Hey, nice website. But this page has zero calories. 🍽️"
               : "Almost! This looks like a food site but I can't find a recipe here.";
-            console.warn('[kaiCook] Insufficient recipe signals (%d) — skipping API call', signalCount);
+            console.log('[kaiCook] Insufficient recipe signals (%d) — skipping API call', signalCount);
             sendResponse({ error });
             return;
           }
