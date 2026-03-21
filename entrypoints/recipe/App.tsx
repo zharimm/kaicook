@@ -98,7 +98,7 @@ export default function App() {
   const [ingredientNames, setIngredientNames] = useState<string[]>([]);
   const [stepTexts, setStepTexts] = useState<string[]>([]);
   const [activeSwapIdx, setActiveSwapIdx] = useState<number | null>(null);
-  const [stepNotes, setStepNotes] = useState<Record<number, { note: string; type: Substitute['type'] }>>({});
+  const [stepNotes, setStepNotes] = useState<Record<number, { ingIdx: number; name: string; note: string; type: Substitute['type'] }[]>>({});
   const [activeSwaps, setActiveSwaps] = useState<Record<number, ActiveSwap>>({});
   const [swapLoading, setSwapLoading] = useState<number | null>(null);
   const [swapsEnriching, setSwapsEnriching] = useState(false);
@@ -174,12 +174,32 @@ export default function App() {
         if (!response?.swaps?.length) return;
         setState(prev => {
           if (prev.status !== 'ready') return prev;
-          const existing = new Set((prev.recipe.swappableIngredients ?? []).map(s => s.name.toLowerCase()));
-          const newSwaps = response.swaps!.filter(s => !existing.has(s.name.toLowerCase()));
-          if (newSwaps.length === 0) return prev; // API didn't add anything new
-          const merged = [...(prev.recipe.swappableIngredients ?? []), ...newSwaps];
-          console.log('[kaiCook] API swaps merged:', newSwaps.length, 'new ingredients');
-          return { ...prev, recipe: { ...prev.recipe, swappableIngredients: merged } };
+          const current = [...(prev.recipe.swappableIngredients ?? [])];
+          const existingMap = new Map(current.map((s, i) => [s.name.toLowerCase(), i]));
+          let changed = false;
+
+          for (const apiSwap of response.swaps!) {
+            const key = apiSwap.name.toLowerCase();
+            const idx = existingMap.get(key);
+            if (idx !== undefined) {
+              // Ingredient exists — merge new substitutes only (dedup by label)
+              const existingLabels = new Set(current[idx].substitutes.map(s => s.label.toLowerCase()));
+              const newSubs = apiSwap.substitutes.filter(s => !existingLabels.has(s.label.toLowerCase()));
+              if (newSubs.length > 0) {
+                current[idx] = { ...current[idx], substitutes: [...current[idx].substitutes, ...newSubs] };
+                changed = true;
+              }
+            } else {
+              // Entirely new ingredient
+              current.push(apiSwap);
+              existingMap.set(key, current.length - 1);
+              changed = true;
+            }
+          }
+
+          if (!changed) return prev;
+          console.log('[kaiCook] API swaps merged into', current.length, 'ingredients');
+          return { ...prev, recipe: { ...prev.recipe, swappableIngredients: current } };
         });
       })
       .catch((err: unknown) => console.warn('[kaiCook] Failed to load API swaps:', err))
@@ -322,22 +342,23 @@ export default function App() {
       });
       setStepTexts(nextSteps);
 
-      // Add notes to affected steps
-      const notes: Record<number, { note: string; type: Substitute['type'] }> = { ...stepNotes };
-      // Clear notes from previous swap of this ingredient
-      for (const key of Object.keys(notes)) {
-        const k = parseInt(key);
-        if (stepNotes[k] && recipe.steps[k] && regex.test(recipe.steps[k])) {
-          delete notes[k];
+      // Stack notes on affected steps — remove previous note for this ingredient, add new one
+      setStepNotes(prev => {
+        const next = { ...prev };
+        // Remove any existing note for this ingredient index on all steps
+        for (const key of Object.keys(next)) {
+          const k = parseInt(key);
+          next[k] = (next[k] ?? []).filter(n => n.ingIdx !== ingIdx);
+          if (next[k].length === 0) delete next[k];
         }
-      }
-      // Add new notes
-      recipe.steps.forEach((s, i) => {
-        if (regex.test(s)) {
-          notes[i] = { note: aiNote, type: sub.type };
-        }
+        // Add new note to affected steps
+        recipe.steps.forEach((s, i) => {
+          if (regex.test(s)) {
+            next[i] = [...(next[i] ?? []), { ingIdx, name: sub.label, note: aiNote, type: sub.type }];
+          }
+        });
+        return next;
       });
-      setStepNotes(notes);
 
       // Track active swap
       setActiveSwaps(prev => ({
@@ -375,13 +396,16 @@ export default function App() {
     const swapRegex = new RegExp(escapeRegex(swap.swappedTo), 'gi');
     setStepTexts(prev => prev.map(s => s.replace(swapRegex, swap.originalName)));
 
-    // Remove step notes for this swap
-    const origRegex = new RegExp(escapeRegex(swap.originalName), 'gi');
-    const notes = { ...stepNotes };
-    recipe.steps.forEach((s, i) => {
-      if (origRegex.test(s)) delete notes[i];
+    // Remove only this ingredient's notes from all steps
+    setStepNotes(prev => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        const k = parseInt(key);
+        next[k] = (next[k] ?? []).filter(n => n.ingIdx !== ingIdx);
+        if (next[k].length === 0) delete next[k];
+      }
+      return next;
     });
-    setStepNotes(notes);
 
     setActiveSwaps(prev => {
       const next = { ...prev };
@@ -542,13 +566,18 @@ export default function App() {
           <div>
             <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase mb-3" style={{ color: 'var(--muted)' }}>
               {accentDot}Ingredients
-              {swapsEnriching && (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 400, fontSize: '0.65rem', letterSpacing: 'normal', textTransform: 'none', color: 'var(--muted)', opacity: 0.7 }}>
-                  <span style={{ display: 'inline-block', width: 8, height: 8, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-                  finding swaps…
-                </span>
-              )}
             </p>
+            {swapsEnriching && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6, marginBottom: '0.75rem',
+                padding: '0.4rem 0.65rem', borderRadius: 6,
+                background: 'var(--muted-bg)', color: 'var(--muted)',
+                fontSize: '0.75rem', fontFamily: "'Inter', sans-serif",
+              }}>
+                <span style={{ display: 'inline-block', width: 10, height: 10, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                Finding more swaps…
+              </div>
+            )}
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {recipe.ingredients.map((ing, i) => {
                 const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
@@ -672,29 +701,33 @@ export default function App() {
                     <p style={{ fontSize: '18px', lineHeight: 1.65, fontFamily: "'Lora', serif" }}>
                       {convertStepTemp(step, unitSystem)}
                     </p>
-                    {stepNotes[i] && (
-                      <div style={{
-                        marginTop: '0.6rem', padding: '0.6rem 0.75rem', borderRadius: 8,
-                        ...(stepNotes[i].type === 'dietary'
-                          ? { outline: '1px solid rgba(194, 65, 12, 0.15)', background: '#fff7ed', color: '#9a3412' }
-                          : { outline: '1px solid rgba(22, 101, 52, 0.05)', background: '#dcfce7', color: '#166534' }
-                        ),
-                        fontSize: '0.8125rem', lineHeight: 1.55,
-                      }}>
-                        <span style={{
-                          fontSize: '0.7rem', fontWeight: 700,
-                          color: stepNotes[i].type === 'dietary' ? '#9a3412' : '#166534',
-                          marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: "'Inter', sans-serif",
-                        }}>
-                          <Ri name="ri-sparkling-line" size={12} /> AI note
-                          {stepNotes[i].type === 'dietary' && (
+                    {stepNotes[i]?.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.6rem' }}>
+                        {stepNotes[i].map((sn, ni) => (
+                          <div key={`${i}-${ni}`} style={{
+                            padding: '0.6rem 0.75rem', borderRadius: 8,
+                            ...(sn.type === 'dietary'
+                              ? { outline: '1px solid rgba(194, 65, 12, 0.15)', background: '#fff7ed', color: '#9a3412' }
+                              : { outline: '1px solid rgba(22, 101, 52, 0.05)', background: '#dcfce7', color: '#166534' }
+                            ),
+                            fontSize: '0.8125rem', lineHeight: 1.55,
+                          }}>
                             <span style={{
-                              marginLeft: '0.3rem', fontSize: '0.625rem', fontWeight: 600,
-                              background: '#fed7aa', color: '#9a3412', padding: '1px 5px', borderRadius: 3,
-                            }}>Dietary swap</span>
-                          )}
-                        </span>
-                        <span>{stepNotes[i].note}</span>
+                              fontSize: '0.7rem', fontWeight: 700,
+                              color: sn.type === 'dietary' ? '#9a3412' : '#166534',
+                              marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: "'Inter', sans-serif",
+                            }}>
+                              <Ri name="ri-sparkling-line" size={12} /> {sn.name}
+                              {sn.type === 'dietary' && (
+                                <span style={{
+                                  marginLeft: '0.3rem', fontSize: '0.625rem', fontWeight: 600,
+                                  background: '#fed7aa', color: '#9a3412', padding: '1px 5px', borderRadius: 3,
+                                }}>Dietary swap</span>
+                              )}
+                            </span>
+                            <span>{sn.note}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

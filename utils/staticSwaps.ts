@@ -142,6 +142,27 @@ function normalise(name: string): string {
   return name.toLowerCase().trim();
 }
 
+// All DB keys sorted longest-first so "all-purpose flour" matches before "flour"
+const DB_KEYS = Object.keys(SWAP_DB).sort((a, b) => b.length - a.length);
+
+/**
+ * Find static swaps for an ingredient name.
+ * Tries: exact → depluralized → contains a known key → key contained in name.
+ * e.g. "granulated sugar" matches "sugar", "unsalted butter" matches "butter"
+ */
+function findStaticMatch(key: string): SubEntry[] | null {
+  // Exact match
+  if (SWAP_DB[key]) return SWAP_DB[key];
+  // Depluralized
+  const singular = key.replace(/es$/, '').replace(/s$/, '');
+  if (SWAP_DB[singular]) return SWAP_DB[singular];
+  // Compound match: ingredient contains a known key (e.g. "granulated sugar" → "sugar")
+  for (const dbKey of DB_KEYS) {
+    if (key.includes(dbKey)) return SWAP_DB[dbKey];
+  }
+  return null;
+}
+
 /**
  * Match recipe ingredients against the static swap database.
  * Returns swappable ingredients instantly — no API call.
@@ -151,12 +172,7 @@ export function getStaticSwaps(ingredients: { name: string }[]): SwappableIngred
 
   for (const ing of ingredients) {
     const key = normalise(ing.name);
-
-    // Try exact match first, then without trailing 's'
-    const subs = SWAP_DB[key]
-      ?? SWAP_DB[key.replace(/s$/, '')]
-      ?? SWAP_DB[key.replace(/es$/, '')]
-      ?? null;
+    const subs = findStaticMatch(key);
 
     if (subs) {
       results.push({
