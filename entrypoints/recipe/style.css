@@ -3,7 +3,7 @@
 /* ── CSS variable theming — toggled by adding .dark to <html> ── */
 :root {
   --bg:           #fafaf8;
-  --fg:           #1a1a1a;
+  --fg:           #414141;
   --card:         #ffffff;
   --border:       #e8e8e4;
   --muted:        #888888;
@@ -47,6 +47,41 @@ body {
   }
 }
 
+/* ── Interactive states ── */
+.btn-icon { transition: background 0.15s, transform 0.1s; }
+.btn-icon:hover { background: var(--muted-bg) !important; }
+.btn-icon:active { transform: scale(0.9); }
+
+.btn-action { transition: filter 0.15s, transform 0.1s; }
+.btn-action:hover { filter: brightness(0.93); }
+.btn-action:active { transform: scale(0.97); }
+
+.btn-step { transition: filter 0.15s, transform 0.1s; }
+.btn-step:hover:not(:disabled) { filter: brightness(0.85); }
+.btn-step:active:not(:disabled) { transform: scale(0.88); }
+
+.swap-pill { transition: filter 0.15s; }
+.swap-pill:hover { filter: brightness(0.93); }
+.swap-pill:active { filter: brightness(0.85); }
+
+.swap-chip { transition: filter 0.12s, transform 0.1s; }
+.swap-chip:hover { filter: brightness(0.94); }
+.swap-chip:active { transform: scale(0.97); }
+
+.btn-primary { transition: filter 0.15s, transform 0.1s; }
+.btn-primary:hover { filter: brightness(1.18); }
+.btn-primary:active { transform: scale(0.98); }
+
+.grocery-label { transition: background 0.12s; }
+.grocery-label:hover { background: var(--muted-bg) !important; }
+
+.btn-text { transition: opacity 0.15s; }
+.btn-text:hover { opacity: 0.7; }
+.btn-text:active { opacity: 0.5; }
+
+.source-link { transition: opacity 0.15s; }
+.source-link:hover { opacity: 0.65; }
+
 @media print {
   .no-print { display: none !important; }
 
@@ -74,3 +109,8 @@ body {
     padding-bottom: 1rem !important;
   }
 }
+
+/* Hide number input spinners */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }

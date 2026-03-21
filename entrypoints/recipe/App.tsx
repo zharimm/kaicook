@@ -1,61 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Recipe } from '../../utils/extractRecipe';
 
-// ─── SVG icons ────────────────────────────────────────────────────────────────
-const ClockIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-  </svg>
-);
-const UsersIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-  </svg>
-);
-const CopyIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-  </svg>
-);
-const ExternalLinkIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-    <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
-  </svg>
-);
-const SunIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="5"/>
-    <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
-    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-    <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
-    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-  </svg>
-);
-const MoonIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-  </svg>
-);
-const ShoppingCartIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/>
-    <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
-  </svg>
-);
-const XIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-  </svg>
-);
-const PrinterIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="6 9 6 2 18 2 18 9"/>
-    <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
-    <rect x="6" y="14" width="12" height="8"/>
-  </svg>
+// ─── Remix icon helper ────────────────────────────────────────────────────────
+const Ri = ({ name, size = 16 }: { name: string; size?: number }) => (
+  <i className={name} style={{ fontSize: size, lineHeight: 1, display: 'inline-flex', userSelect: 'none' }} />
 );
 
 // ─── Unit conversion ───────────────────────────────────────────────────────────
@@ -91,6 +39,20 @@ function fmtQty(n: number): string {
   return parseFloat(n.toFixed(2)).toString();
 }
 
+// ─── Sugar swaps ──────────────────────────────────────────────────────────────
+const SUGAR_SWAPS = [
+  { label: 'Honey', type: 'ratio_change', impact: 'Changes flavour', note: 'Use 75% of the amount and reduce other liquids by 1 tbsp. Adds a floral flavour.' },
+  { label: 'Maple syrup', type: 'flavour_change', impact: 'Changes flavour', note: 'Use same quantity but expect a subtle maple flavour. Works best in bakes and sauces.' },
+  { label: 'Agave nectar', type: 'ratio_change', impact: 'Adjusts recipe', note: 'Use 75% of the amount. Sweeter than sugar with a neutral taste. Reduce oven temperature by 10°C as it browns faster.' },
+  { label: 'Coconut sugar', type: 'safe', impact: 'Safe swap', note: '1:1 replacement. Slightly less sweet with a caramel-like flavour.' },
+];
+
+function swapColor(type: string): string {
+  if (type === 'safe') return '#16a34a';
+  if (type === 'flavour_change') return '#d97706';
+  return '#ea580c';
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 type State =
   | { status: 'loading' }
@@ -102,6 +64,7 @@ export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' });
   const [dark, setDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
   const [servings, setServings] = useState(1);
+  const [servingsDraft, setServingsDraft] = useState<string>('1');
   const [baseServings, setBaseServings] = useState(1);
   const [copied, setCopied] = useState(false);
   const [unitSystem, setUnitSystem] = useState<UnitSystem>('imperial');
@@ -111,6 +74,14 @@ export default function App() {
   const [checked, setChecked] = useState<boolean[]>([]);
   const [listCopied, setListCopied] = useState(false);
 
+  const didInit = useRef(false);
+
+  // Swap state
+  const [ingredientNames, setIngredientNames] = useState<string[]>([]);
+  const [stepTexts, setStepTexts] = useState<string[]>([]);
+  const [activeSwapIdx, setActiveSwapIdx] = useState<number | null>(null);
+  const [stepNotes, setStepNotes] = useState<Record<number, { note: string; type: string }>>({});
+
   // Sync dark class to <html> so CSS variables flip
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -118,6 +89,8 @@ export default function App() {
 
   // Read recipe + source URL from session storage, and unit preference from local storage
   useEffect(() => {
+    if (didInit.current) return;
+    didInit.current = true;
     Promise.all([
       browser.storage.session.get(['recipe', 'recipeSourceUrl']),
       browser.storage.local.get('unitSystem'),
@@ -131,6 +104,8 @@ export default function App() {
       setBaseServings(base);
       setServings(base);
       setChecked(recipe.ingredients.map(() => true));
+      setIngredientNames(recipe.ingredients.map(i => i.name));
+      setStepTexts(recipe.steps);
       document.title = `${recipe.title} — kaiCook`;
       setState({ status: 'ready', recipe, sourceUrl: (sessionResult.recipeSourceUrl as string) ?? '' });
 
@@ -154,6 +129,16 @@ export default function App() {
     browser.storage.local.onChanged.addListener(handler);
     return () => browser.storage.local.onChanged.removeListener(handler);
   }, []);
+
+  // Close swap popover on outside click
+  useEffect(() => {
+    if (activeSwapIdx === null) return;
+    const handler = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-swap-popover]')) setActiveSwapIdx(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [activeSwapIdx]);
 
   if (state.status === 'loading') {
     return (
@@ -226,6 +211,26 @@ export default function App() {
     });
   }
 
+  // ── Swap helpers ──
+  function handleSwap(ingIdx: number, swap: typeof SUGAR_SWAPS[number]) {
+    setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? swap.label : n));
+    const nextSteps = stepTexts.map(s => s.replace(/sugar/gi, swap.label));
+    setStepTexts(nextSteps);
+    const notes: Record<number, { note: string; type: string }> = { ...stepNotes };
+    stepTexts.forEach((s, i) => {
+      if (/sugar/i.test(s)) notes[i] = { note: swap.note, type: swap.type };
+    });
+    setStepNotes(notes);
+    setActiveSwapIdx(null);
+  }
+
+  function handleRevert(ingIdx: number, currentLabel: string, origName: string) {
+    setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? origName : n));
+    setStepTexts(prev => prev.map(s => s.replace(new RegExp(currentLabel, 'gi'), origName)));
+    setStepNotes({});
+    setActiveSwapIdx(null);
+  }
+
   // ── Shared style helpers ──
   const iconBtnStyle: React.CSSProperties = {
     background: 'transparent', border: 'none', cursor: 'pointer',
@@ -243,7 +248,7 @@ export default function App() {
   );
 
   return (
-    <div style={{ background: 'var(--bg)', color: 'var(--fg)', minHeight: '100vh' }}>
+    <div style={{ background: 'var(--bg)', color: 'var(--fg)', minHeight: '100vh', fontFamily: "'Inter', sans-serif", fontSize: '14px' }}>
       <div className="max-w-4xl mx-auto px-6" style={{ paddingTop: '2.5rem', paddingBottom: '5rem' }}>
 
         {/* ── Topbar ── */}
@@ -251,45 +256,46 @@ export default function App() {
           <span className="text-xs font-bold tracking-widest uppercase" style={{ color: 'var(--muted)' }}>
             kaiCook
           </span>
-          <button style={iconBtnStyle} onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
-            {dark ? <SunIcon /> : <MoonIcon />}
+          <button className="btn-icon" style={iconBtnStyle} onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
+            {dark ? <Ri name="ri-sun-line" /> : <Ri name="ri-moon-line" />}
           </button>
         </div>
 
         {/* ── Title + action buttons ── */}
         <div className="flex items-start justify-between gap-4 mb-3">
-          <h1 className="text-3xl font-bold tracking-tight" style={{ lineHeight: 1.2, letterSpacing: '-0.02em' }}>
+          <h1 className="text-3xl tracking-tight" style={{ lineHeight: 1.2, letterSpacing: '-0.02em', fontFamily: "'Lora', serif", fontWeight: 400 }}>
             {recipe.title}
           </h1>
           <div className="no-print flex items-center gap-2 shrink-0">
             <button
               onClick={() => setGroceryOpen(true)}
-              className="flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg"
+              className="btn-action flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg"
               style={{ background: 'var(--muted-bg)', color: 'var(--fg)', border: 'none', cursor: 'pointer' }}
             >
-              <ShoppingCartIcon />
+              <Ri name="ri-shopping-cart-line" size={15} />
               Grocery List
             </button>
             <button
               onClick={copyRecipe}
-              className="flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg"
+              className="btn-action flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg"
               style={{ background: 'var(--muted-bg)', color: 'var(--fg)', border: 'none', cursor: 'pointer' }}
             >
-              {copied ? '✓' : <CopyIcon />}
+              {copied ? <Ri name="ri-check-line" size={15} /> : <Ri name="ri-file-copy-line" size={15} />}
               {copied ? 'Copied!' : 'Copy'}
             </button>
             <button
               onClick={() => window.print()}
               aria-label="Print recipe"
-              style={{ ...iconBtnStyle, background: 'var(--muted-bg)', padding: '0.5rem 0.6rem', borderRadius: 8 }}
+              className="btn-icon"
+              style={{ ...iconBtnStyle, background: 'var(--muted-bg)', color: 'var(--fg)', padding: '0.5rem 0.6rem', borderRadius: 8 }}
             >
-              <PrinterIcon />
+              <Ri name="ri-printer-line" size={15} />
             </button>
           </div>
         </div>
 
         {recipe.description && (
-          <p className="text-base leading-relaxed mb-6" style={{ color: 'var(--muted)', maxWidth: 640 }}>
+          <p className="text-base leading-relaxed mb-6" style={{ color: 'var(--fg)', maxWidth: 640 }}>
             {recipe.description}
           </p>
         )}
@@ -299,7 +305,7 @@ export default function App() {
           <div className="flex flex-wrap gap-3 mb-8">
             {recipe.totalTime && (
               <div className="flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
-                <span style={{ color: 'var(--muted)', display: 'flex' }}><ClockIcon /></span>
+                <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-time-line" /></span>
                 <div>
                   <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Total time</p>
                   <p className="text-sm font-semibold">{recipe.totalTime}</p>
@@ -308,22 +314,45 @@ export default function App() {
             )}
             {recipe.servings > 0 && (
               <div className="flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
-                <span style={{ color: 'var(--muted)', display: 'flex' }}><UsersIcon /></span>
+                <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-group-line" /></span>
                 <div>
                   <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Serves</p>
-                  <div className="flex items-center gap-2" style={{ marginTop: 2 }}>
+                  <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
                     <button
-                      className="no-print"
+                      className="no-print btn-step"
                       style={{ ...stepBtnStyle, opacity: servings <= 1 ? 0.3 : 1, cursor: servings <= 1 ? 'default' : 'pointer' }}
-                      onClick={() => setServings((s) => Math.max(1, s - 1))}
+                      onClick={() => { const v = Math.max(1, servings - 1); setServings(v); setServingsDraft(String(v)); }}
                       disabled={servings <= 1}
                       aria-label="Decrease servings"
                     >−</button>
-                    <span className="text-sm font-semibold" style={{ minWidth: '1.25rem', textAlign: 'center' }}>{servings}</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={servingsDraft}
+                      onChange={(e) => {
+                        setServingsDraft(e.target.value);
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v) && v >= 1) setServings(v);
+                      }}
+                      onBlur={() => {
+                        const v = parseInt(servingsDraft, 10);
+                        const clamped = (!isNaN(v) && v >= 1) ? v : 1;
+                        setServings(clamped);
+                        setServingsDraft(String(clamped));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                      }}
+                      onFocus={(e) => e.target.select()}
+                      className="text-sm font-semibold"
+                      style={{ width: '2rem', height: '1.5rem', textAlign: 'center', background: 'transparent',
+                        color: 'var(--fg)', border: 'none', outline: '1px solid rgba(0,0,0,0.12)',
+                        borderRadius: 4, padding: 0, boxSizing: 'border-box' }}
+                    />
                     <button
-                      className="no-print"
+                      className="no-print btn-step"
                       style={stepBtnStyle}
-                      onClick={() => setServings((s) => s + 1)}
+                      onClick={() => { const v = servings + 1; setServings(v); setServingsDraft(String(v)); }}
                       aria-label="Increase servings"
                     >+</button>
                   </div>
@@ -349,11 +378,66 @@ export default function App() {
                 const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
                 const qty = dispQty > 0 ? <strong>{fmtQty(dispQty)} </strong> : null;
                 const unit = dispUnit ? `${dispUnit} ` : '';
+                const name = ingredientNames[i] ?? ing.name;
+                const wasOriginallySwappable = ing.name.toLowerCase().includes('sugar');
+                const hasBeenSwapped = wasOriginallySwappable && !name.toLowerCase().includes('sugar');
+                const isSwappable = wasOriginallySwappable;
+                const nameEl = isSwappable ? (
+                  <span style={{ position: 'relative', display: 'inline' }} data-swap-popover>
+                    <span
+                      onClick={() => setActiveSwapIdx(activeSwapIdx === i ? null : i)}
+                      className="swap-pill"
+                      style={{ padding: '2px 5px', borderRadius: 4, cursor: 'pointer', display: 'inline', background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)' }}
+                    >
+                      {name.toLowerCase()}
+                    </span>
+                    {activeSwapIdx === i && (
+                      <div data-swap-popover style={{
+                        position: 'absolute', top: '100%', left: 0, zIndex: 20, marginTop: 6,
+                        background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10,
+                        padding: '0.6rem 0.7rem', display: 'flex', flexDirection: 'column', gap: '0.5rem',
+                        width: 300, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                      }}>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                          {[ing.name, ...SUGAR_SWAPS.map(s => s.label)].map(label => {
+                            const isCurrent = label.toLowerCase() === name.toLowerCase();
+                            const isOriginal = label === ing.name;
+                            return (
+                              <span
+                                key={label}
+                                className={isCurrent ? '' : 'swap-chip'}
+                                onClick={isCurrent ? undefined : (e) => {
+                                  e.stopPropagation();
+                                  if (isOriginal) handleRevert(i, name, ing.name);
+                                  else handleSwap(i, SUGAR_SWAPS.find(s => s.label === label)!);
+                                }}
+                                style={{ padding: '2px 5px', borderRadius: 4, display: 'inline',
+                                  fontSize: '0.8125rem', fontWeight: 500,
+                                  ...(isCurrent
+                                    ? { background: 'var(--muted-bg)', color: 'var(--muted)', outline: '1px solid rgba(0,0,0,0.05)', cursor: 'default' }
+                                    : { background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)', cursor: 'pointer' }
+                                  )}}
+                              >
+                                {label.toLowerCase()}
+                              </span>
+                            );
+                          })}
+                        </div>
+                        <hr style={{ margin: 0, border: 'none', borderTop: '1px solid var(--border)' }} />
+                        <p style={{ margin: 0, display: 'flex', alignItems: 'flex-start', gap: '0.3rem',
+                          fontSize: '0.75rem', color: 'var(--muted)', lineHeight: 1.45 }}>
+                          <Ri name="ri-information-line" size={13} />
+                          Some swaps may change the ratio or flavour of your recipe.
+                        </p>
+                      </div>
+                    )}
+                  </span>
+                ) : <span>{name}</span>;
                 return (
                   <li key={i} className="flex items-start gap-3 rounded-lg text-sm"
-                    style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.6rem 0.75rem', lineHeight: 1.45 }}>
+                    style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.6rem 0.75rem', lineHeight: 1.45, overflow: 'visible' }}>
                     <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--muted)', opacity: 0.5, flexShrink: 0, marginTop: '0.35rem', display: 'block' }} />
-                    <span>{qty}{unit}{ing.name}</span>
+                    <span>{qty}{unit}{nameEl}</span>
                   </li>
                 );
               })}
@@ -366,13 +450,28 @@ export default function App() {
               {accentDot}Steps
             </p>
             <ol style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              {recipe.steps.map((step, i) => (
+              {(stepTexts.length ? stepTexts : recipe.steps).map((step, i) => (
                 <li key={i} className="flex items-start gap-4">
                   <span className="flex items-center justify-center shrink-0 text-xs font-bold rounded-full"
                     style={{ width: '2rem', height: '2rem', background: 'var(--primary)', color: 'var(--primary-fg)' }}>
                     {i + 1}
                   </span>
-                  <p style={{ paddingTop: '0.3rem', fontSize: '0.9375rem', lineHeight: 1.65 }}>{convertStepTemp(step, unitSystem)}</p>
+                  <div className="flex flex-col" style={{ paddingTop: '0.3rem', flex: 1 }}>
+                    <p style={{ fontSize: '18px', lineHeight: 1.65, fontFamily: "'Lora', serif" }}>{convertStepTemp(step, unitSystem)}</p>
+                    {stepNotes[i] && (
+                      <div style={{
+                        marginTop: '0.6rem', padding: '0.6rem 0.75rem', borderRadius: 8,
+                        outline: '1px solid rgba(22, 101, 52, 0.05)', background: '#dcfce7', color: '#166534',
+                        fontSize: '0.8125rem', lineHeight: 1.55,
+                      }}>
+                        <span style={{
+                          fontSize: '0.7rem', fontWeight: 700, color: '#166534',
+                          marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: "'Inter', sans-serif",
+                        }}><Ri name="ri-sparkling-line" size={12} /> AI note</span>
+                        <span>{stepNotes[i].note}</span>
+                      </div>
+                    )}
+                  </div>
                 </li>
               ))}
             </ol>
@@ -386,10 +485,10 @@ export default function App() {
               href={sourceUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 text-sm"
+              className="source-link inline-flex items-center gap-2 text-sm"
               style={{ color: 'var(--muted)', textDecoration: 'none' }}
             >
-              <ExternalLinkIcon />
+              <Ri name="ri-external-link-line" size={14} />
               View original recipe
             </a>
           </div>
@@ -423,12 +522,13 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                 <button
                   onClick={toggleAll}
+                  className="btn-text"
                   style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--accent)', fontWeight: 500, padding: 0 }}
                 >
                   {allChecked ? 'Deselect all' : 'Select all'}
                 </button>
-                <button style={iconBtnStyle} onClick={() => setGroceryOpen(false)} aria-label="Close grocery list">
-                  <XIcon />
+                <button className="btn-icon" style={iconBtnStyle} onClick={() => setGroceryOpen(false)} aria-label="Close grocery list">
+                  <Ri name="ri-close-line" />
                 </button>
               </div>
             </div>
@@ -445,7 +545,7 @@ export default function App() {
 
                   return (
                     <li key={i}>
-                      <label style={{
+                      <label className="grocery-label" style={{
                         display: 'flex', alignItems: 'center', gap: '0.75rem',
                         padding: '0.6rem 0.5rem', borderRadius: 8, cursor: 'pointer',
                         opacity: isChecked ? 1 : 0.4,
@@ -472,6 +572,7 @@ export default function App() {
             {/* Panel footer */}
             <div style={{ padding: '1rem 1.25rem', borderTop: '1px solid var(--border)' }}>
               <button
+                className="btn-primary"
                 onClick={copyGroceryList}
                 style={{
                   width: '100%', padding: '0.65rem', borderRadius: 8,
@@ -481,7 +582,7 @@ export default function App() {
                   display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
                 }}
               >
-                {listCopied ? '✓ Copied!' : <><CopyIcon /> Copy list</>}
+                {listCopied ? <><Ri name="ri-check-line" size={15} /> Copied!</> : <><Ri name="ri-file-copy-line" size={15} /> Copy list</>}
               </button>
             </div>
 
