@@ -127,6 +127,9 @@ const SWAP_DB: Record<string, SubEntry[]> = {
   'baking powder': [
     { label: 'baking soda + cream of tartar', type: 'safe', note: '¼ tsp soda + ½ tsp cream of tartar per 1 tsp powder.' },
   ],
+  'baking soda': [
+    { label: 'baking powder', type: 'ratio_change', ratioChange: 3, note: 'Use 3x the amount; baking powder already contains acid.' },
+  ],
   cornstarch: [
     { label: 'arrowroot powder', type: 'safe', note: 'Works 1:1 for thickening; don\'t boil.' },
     { label: 'flour', type: 'ratio_change', ratioChange: 2, note: 'Use double the amount; results in slightly cloudier sauce.' },
@@ -134,6 +137,25 @@ const SWAP_DB: Record<string, SubEntry[]> = {
   'tomato paste': [
     { label: 'tomato sauce', type: 'ratio_change', ratioChange: 3, note: 'Use 3x the amount; thinner, reduce other liquids.' },
     { label: 'sun-dried tomatoes (blended)', type: 'flavour_change', note: 'More intense; add a splash of water.' },
+  ],
+  'cocoa powder': [
+    { label: 'cacao powder', type: 'flavour_change', note: 'Less processed, slightly more bitter; works 1:1.' },
+    { label: 'carob powder', type: 'flavour_change', note: 'Naturally sweeter, no caffeine; similar colour.' },
+  ],
+  'vanilla extract': [
+    { label: 'vanilla bean paste', type: 'safe', note: 'Richer flavour with visible bean specks; works 1:1.' },
+    { label: 'almond extract', type: 'flavour_change', ratioChange: 0.5, note: 'Use half; stronger, nutty flavour.' },
+  ],
+  'buttermilk': [
+    { label: 'milk + lemon juice', type: 'safe', note: '1 cup milk + 1 tbsp lemon juice; let sit 5 min.' },
+    { label: 'plain yogurt', type: 'safe', note: 'Thin with a splash of milk to match consistency.' },
+  ],
+  yogurt: [
+    { label: 'sour cream', type: 'safe', note: 'Richer and tangier; works 1:1 in baking and sauces.' },
+    { label: 'coconut yogurt', type: 'dietary', note: 'Dairy-free; slightly sweeter, works in most recipes.' },
+  ],
+  'salt': [
+    { label: 'soy sauce', type: 'flavour_change', ratioChange: 0.25, note: 'Use ¼ tsp per tsp salt; adds umami, darkens colour.' },
   ],
 };
 

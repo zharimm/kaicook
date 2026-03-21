@@ -12,12 +12,20 @@ export interface SwappableIngredient {
   substitutes: Substitute[];
 }
 
+export interface Ingredient {
+  name: string;
+  quantity: number;
+  unit: string;
+  prep?: string;          // separated prep notes, e.g. "finely chopped"
+  originalText?: string;  // raw text before normalization
+}
+
 export interface Recipe {
   title: string;
   description?: string;
   servings: number;
   totalTime?: string;
-  ingredients: { name: string; quantity: number; unit: string }[];
+  ingredients: Ingredient[];
   steps: string[];
   swappableIngredients?: SwappableIngredient[];
 }
@@ -129,31 +137,57 @@ export async function extractRecipe(pageText: string, jsonLd?: string): Promise<
   return recipe;
 }
 
-/** Lazy-load swappable ingredients for an already-extracted recipe */
-export async function fetchSwappableIngredients(recipe: Recipe): Promise<SwappableIngredient[]> {
+/** Merged normalize + swap: one API call that cleans up messy ingredient data AND generates substitutes */
+export interface NormalizeAndSwapResult {
+  normalizedIngredients: Ingredient[];
+  swappableIngredients: SwappableIngredient[];
+}
+
+export async function fetchNormalizedAndSwaps(recipe: Recipe): Promise<NormalizeAndSwapResult> {
   const client = getClient();
 
-  const ingredientNames = recipe.ingredients.map(i => i.name).join(', ');
+  // Build a compact ingredient list showing what we parsed locally
+  const ingredientList = recipe.ingredients.map((ing, i) =>
+    `${i}: qty=${ing.quantity} unit="${ing.unit}" name="${ing.name}"`
+  ).join('\n');
 
   const response = await callWithRetry(() =>
     withTimeout(
       client.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2000,
-        system: `You are a cooking assistant. Given a recipe's ingredient list, identify which ingredients have common substitutes and return ONLY a valid JSON array — no markdown, no explanation, no code block.
+        max_tokens: 2500,
+        system: `You are a cooking assistant. You receive a recipe's ingredient list that was auto-parsed from a website. The parsing is often messy — ingredient names may contain embedded quantities, mixed units (imperial + metric), prep instructions, or qualifiers.
 
-Each element: { "name": string, "substitutes": [{ "label": string, "type": "safe" | "ratio_change" | "flavour_change" | "dietary" | "availability", "ratioChange": number | null, "note": string }] }
+Your job: (1) normalize each ingredient, and (2) suggest substitutes for swappable ones. Return ONLY a valid JSON object — no markdown, no explanation, no code block.
 
-Rules:
-- "name" must exactly match one of the provided ingredient names
-- Include 2-4 substitutes per swappable ingredient
-- Only include ingredients that have meaningful, common swaps
+Shape:
+{
+  "ingredients": [
+    { "index": number, "name": string, "quantity": number, "unit": string, "prep": string | null }
+  ],
+  "swaps": [
+    { "index": number, "substitutes": [{ "label": string, "type": "safe" | "ratio_change" | "flavour_change" | "dietary" | "availability", "ratioChange": number | null, "note": string }] }
+  ]
+}
+
+Normalization rules:
+- "name" = clean ingredient name only (e.g. "all-purpose flour", not "2 cups (256g) all-purpose flour")
+- Strip parenthetical unit conversions from name (e.g. "(256g)", "(about 2 cups)")
+- Separate prep instructions into "prep" (e.g. "finely chopped", "room temperature", "beaten")
+- Remove qualifiers only if they don't change the ingredient identity ("large" egg → prep: null, but "smoked paprika" stays)
+- Fix quantity and unit if the original parse was wrong (e.g. if "1" was parsed but name has "14.5 oz can" → quantity: 1, unit: "can", name: "diced tomatoes", prep: "14.5 oz")
+- Pick one unit system — prefer the primary one used in the recipe. Drop the duplicate.
+- quantity must be a number (0 if truly unknown), unit can be ""
+
+Swap rules:
+- Only include ingredients with meaningful, common substitutes
+- 2-3 substitutes per ingredient
 - type: "safe" = 1:1 drop-in, "ratio_change" = different amount, "flavour_change" = alters taste, "dietary" = allergen/diet swap, "availability" = hard-to-find alternative
 - ratioChange: multiplier vs original (e.g. 0.75 = use 75%), null if 1:1
-- note: 1 sentence on how the swap affects the recipe`,
+- note: 1 sentence on impact`,
         messages: [{
           role: 'user',
-          content: `Recipe: "${recipe.title}"\nIngredients: ${ingredientNames}`,
+          content: `Recipe: "${recipe.title}" (${recipe.servings} servings)\n\nIngredients:\n${ingredientList}`,
         }],
       }),
       API_TIMEOUT_MS,
@@ -162,7 +196,30 @@ Rules:
 
   const text = response.content[0].type === 'text' ? response.content[0].text : '';
   const clean = text.replace(/^```json\s*/, '').replace(/```\s*$/, '').trim();
-  return JSON.parse(clean) as SwappableIngredient[];
+  const parsed = JSON.parse(clean);
+
+  // Map normalized ingredients back, preserving original text
+  const normalizedIngredients: Ingredient[] = recipe.ingredients.map((orig, i) => {
+    const norm = parsed.ingredients?.find((n: { index: number }) => n.index === i);
+    if (!norm) return orig;
+    return {
+      name: norm.name || orig.name,
+      quantity: typeof norm.quantity === 'number' ? norm.quantity : orig.quantity,
+      unit: norm.unit ?? orig.unit,
+      prep: norm.prep || undefined,
+      originalText: orig.name !== norm.name ? orig.name : undefined,
+    };
+  });
+
+  // Map swaps to use normalized names
+  const swappableIngredients: SwappableIngredient[] = (parsed.swaps ?? []).map(
+    (s: { index: number; substitutes: Substitute[] }) => ({
+      name: normalizedIngredients[s.index]?.name ?? recipe.ingredients[s.index]?.name ?? '',
+      substitutes: s.substitutes,
+    })
+  );
+
+  return { normalizedIngredients, swappableIngredients };
 }
 
 export interface SwapResult {

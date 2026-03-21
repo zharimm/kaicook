@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Recipe, SwappableIngredient, Substitute } from '../../utils/extractRecipe';
+import type { Ingredient, Recipe, SwappableIngredient, Substitute } from '../../utils/extractRecipe';
 import { getStaticSwaps } from '../../utils/staticSwaps';
 
 // ─── Remix icon helper ────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ export default function App() {
     });
   }, []);
 
-  // Two-phase swap loading: static (instant) → API (enriched)
+  // Two-phase loading: static swaps (instant) → merged normalize+swap API call (background)
   useEffect(() => {
     if (state.status !== 'ready') return;
     const recipe = state.recipe;
@@ -167,42 +167,92 @@ export default function App() {
       }
     }
 
-    // Phase 2: fetch API swaps in background, merge any new ones
+    // Phase 2: merged normalize + swap call — cleans ingredients AND generates swaps in one shot
     setSwapsEnriching(true);
-    browser.runtime.sendMessage({ type: 'FETCH_SWAPS', recipe })
-      .then((response: { swaps?: SwappableIngredient[]; error?: string }) => {
-        if (!response?.swaps?.length) return;
+    browser.runtime.sendMessage({ type: 'FETCH_NORMALIZE_AND_SWAPS', recipe })
+      .then((response: { normalizedIngredients?: Ingredient[]; swaps?: SwappableIngredient[]; error?: string }) => {
+        if (response?.error) {
+          console.warn('[kaiCook] Normalize+swap failed:', response.error);
+          return;
+        }
+
         setState(prev => {
           if (prev.status !== 'ready') return prev;
-          const current = [...(prev.recipe.swappableIngredients ?? [])];
-          const existingMap = new Map(current.map((s, i) => [s.name.toLowerCase(), i]));
-          let changed = false;
+          let updatedRecipe = { ...prev.recipe };
 
-          for (const apiSwap of response.swaps!) {
-            const key = apiSwap.name.toLowerCase();
-            const idx = existingMap.get(key);
-            if (idx !== undefined) {
-              // Ingredient exists — merge new substitutes only (dedup by label)
-              const existingLabels = new Set(current[idx].substitutes.map(s => s.label.toLowerCase()));
-              const newSubs = apiSwap.substitutes.filter(s => !existingLabels.has(s.label.toLowerCase()));
-              if (newSubs.length > 0) {
-                current[idx] = { ...current[idx], substitutes: [...current[idx].substitutes, ...newSubs] };
-                changed = true;
-              }
-            } else {
-              // Entirely new ingredient
-              current.push(apiSwap);
-              existingMap.set(key, current.length - 1);
-              changed = true;
+          // Build a map of old name → new name for re-keying swaps after normalization
+          const nameChanges = new Map<string, string>();
+
+          // Apply normalized ingredients — update names, quantities, units, prep
+          if (response?.normalizedIngredients?.length) {
+            updatedRecipe = {
+              ...updatedRecipe,
+              ingredients: updatedRecipe.ingredients.map((orig, i) => {
+                const norm = response.normalizedIngredients![i];
+                if (!norm) return orig;
+                if (orig.name.toLowerCase() !== norm.name.toLowerCase()) {
+                  nameChanges.set(orig.name.toLowerCase(), norm.name);
+                }
+                return { ...orig, ...norm };
+              }),
+            };
+            // Also update the displayed ingredient names
+            setIngredientNames(updatedRecipe.ingredients.map(ing => ing.name));
+            console.log('[kaiCook] Ingredients normalized by AI');
+          }
+
+          // Re-key existing swappable entries to match normalized names
+          if (nameChanges.size > 0 && updatedRecipe.swappableIngredients?.length) {
+            updatedRecipe = {
+              ...updatedRecipe,
+              swappableIngredients: updatedRecipe.swappableIngredients.map(si => {
+                const newName = nameChanges.get(si.name.toLowerCase());
+                return newName ? { ...si, name: newName } : si;
+              }),
+            };
+          }
+
+          // Also re-run static swaps with normalized names to catch previously missed matches
+          if (nameChanges.size > 0) {
+            const freshStatic = getStaticSwaps(updatedRecipe.ingredients);
+            const existing = new Set((updatedRecipe.swappableIngredients ?? []).map(s => s.name.toLowerCase()));
+            const newStatic = freshStatic.filter(s => !existing.has(s.name.toLowerCase()));
+            if (newStatic.length > 0) {
+              updatedRecipe = {
+                ...updatedRecipe,
+                swappableIngredients: [...(updatedRecipe.swappableIngredients ?? []), ...newStatic],
+              };
+              console.log('[kaiCook] Fresh static swaps after normalization:', newStatic.length);
             }
           }
 
-          if (!changed) return prev;
-          console.log('[kaiCook] API swaps merged into', current.length, 'ingredients');
-          return { ...prev, recipe: { ...prev.recipe, swappableIngredients: current } };
+          // Apply API swaps — merge with any existing static swaps
+          if (response?.swaps?.length) {
+            const current = [...(updatedRecipe.swappableIngredients ?? [])];
+            const existingMap = new Map(current.map((s, i) => [s.name.toLowerCase(), i]));
+
+            for (const apiSwap of response.swaps!) {
+              const key = apiSwap.name.toLowerCase();
+              const idx = existingMap.get(key);
+              if (idx !== undefined) {
+                const existingLabels = new Set(current[idx].substitutes.map(s => s.label.toLowerCase()));
+                const newSubs = apiSwap.substitutes.filter(s => !existingLabels.has(s.label.toLowerCase()));
+                if (newSubs.length > 0) {
+                  current[idx] = { ...current[idx], substitutes: [...current[idx].substitutes, ...newSubs] };
+                }
+              } else {
+                current.push(apiSwap);
+                existingMap.set(key, current.length - 1);
+              }
+            }
+            updatedRecipe = { ...updatedRecipe, swappableIngredients: current };
+            console.log('[kaiCook] AI swaps merged:', current.length, 'ingredients');
+          }
+
+          return { ...prev, recipe: updatedRecipe };
         });
       })
-      .catch((err: unknown) => console.warn('[kaiCook] Failed to load API swaps:', err))
+      .catch((err: unknown) => console.warn('[kaiCook] Normalize+swap failed:', err))
       .finally(() => setSwapsEnriching(false));
   }, [state.status]);
 
@@ -329,34 +379,51 @@ export default function App() {
       // Update ingredient name
       setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? sub.label : n));
 
-      // Replace in steps
-      const regex = new RegExp(escapeRegex(origName), 'gi');
-      // Also replace any previously swapped name
+      // Build search patterns: full name + individual words (4+ chars) for compound names
+      // e.g. "granulated sugar" → try "granulated sugar" first, then "sugar", "granulated"
+      const searchTerms = [origName];
       const currentName = ingredientNames[ingIdx];
-      const currentRegex = currentName !== origName ? new RegExp(escapeRegex(currentName), 'gi') : null;
+      if (currentName !== origName) searchTerms.push(currentName);
+      // Add individual words from the ingredient name for partial matching in steps
+      const words = origName.split(/\s+/).filter(w => w.length >= 4);
+      for (const word of words) {
+        if (!searchTerms.some(t => t.toLowerCase() === word.toLowerCase())) {
+          searchTerms.push(word);
+        }
+      }
 
+      // Replace in steps — try each search term, use the first that matches per step
       const nextSteps = stepTexts.map(s => {
-        let result = s.replace(regex, sub.label);
-        if (currentRegex) result = result.replace(currentRegex, sub.label);
-        return result;
+        for (const term of searchTerms) {
+          const r = new RegExp(escapeRegex(term), 'gi');
+          if (r.test(s)) return s.replace(r, sub.label);
+        }
+        return s;
       });
       setStepTexts(nextSteps);
 
-      // Stack notes on affected steps — remove previous note for this ingredient, add new one
+      // Find which original steps mention this ingredient (using same search terms)
+      const affectedSteps = new Set<number>();
+      recipe.steps.forEach((s, i) => {
+        for (const term of searchTerms) {
+          if (new RegExp(escapeRegex(term), 'gi').test(s)) {
+            affectedSteps.add(i);
+            break;
+          }
+        }
+      });
+
+      // Stack notes on affected steps
       setStepNotes(prev => {
         const next = { ...prev };
-        // Remove any existing note for this ingredient index on all steps
         for (const key of Object.keys(next)) {
           const k = parseInt(key);
           next[k] = (next[k] ?? []).filter(n => n.ingIdx !== ingIdx);
           if (next[k].length === 0) delete next[k];
         }
-        // Add new note to affected steps
-        recipe.steps.forEach((s, i) => {
-          if (regex.test(s)) {
-            next[i] = [...(next[i] ?? []), { ingIdx, name: sub.label, note: aiNote, type: sub.type }];
-          }
-        });
+        for (const i of affectedSteps) {
+          next[i] = [...(next[i] ?? []), { ingIdx, name: sub.label, note: aiNote, type: sub.type }];
+        }
         return next;
       });
 
@@ -375,8 +442,15 @@ export default function App() {
       console.error('[kaiCook] Swap API call failed:', err);
       // Fallback: still apply swap with pre-existing note
       setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? sub.label : n));
-      const regex = new RegExp(escapeRegex(swappableInfo.name), 'gi');
-      setStepTexts(prev => prev.map(s => s.replace(regex, sub.label)));
+      // Use same compound-aware replacement
+      const fallbackTerms = [swappableInfo.name, ...swappableInfo.name.split(/\s+/).filter(w => w.length >= 4)];
+      setStepTexts(prev => prev.map(s => {
+        for (const term of fallbackTerms) {
+          const r = new RegExp(escapeRegex(term), 'gi');
+          if (r.test(s)) return s.replace(r, sub.label);
+        }
+        return s;
+      }));
       setActiveSwaps(prev => ({
         ...prev,
         [ingIdx]: { originalName: origName, swappedTo: sub.label, note: sub.note ?? '', type: sub.type, quantityMultiplier: sub.ratioChange ?? null },
@@ -393,8 +467,15 @@ export default function App() {
 
     setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? swap.originalName : n));
 
+    // Revert step text: replace the swapped name back to the short form that was in the original step
+    // Find which term was actually used in the original steps (could be a word from compound name)
+    const origWords = swap.originalName.split(/\s+/).filter(w => w.length >= 4);
+    const revertTo = recipe.steps.some(s => new RegExp(escapeRegex(swap.originalName), 'gi').test(s))
+      ? swap.originalName
+      : origWords.find(w => recipe.steps.some(s => new RegExp(escapeRegex(w), 'gi').test(s))) ?? swap.originalName;
+
     const swapRegex = new RegExp(escapeRegex(swap.swappedTo), 'gi');
-    setStepTexts(prev => prev.map(s => s.replace(swapRegex, swap.originalName)));
+    setStepTexts(prev => prev.map(s => s.replace(swapRegex, revertTo)));
 
     // Remove only this ingredient's notes from all steps
     setStepNotes(prev => {
@@ -421,6 +502,20 @@ export default function App() {
 
     setActiveSwapIdx(null);
   }
+
+  function handleResetAll() {
+    if (state.status !== 'ready') return;
+    // Restore original ingredient names and step texts from the recipe
+    setIngredientNames(state.recipe.ingredients.map(i => i.name));
+    setStepTexts(state.recipe.steps);
+    setActiveSwaps({});
+    setStepNotes({});
+    setActiveSwapIdx(null);
+    setPreferredSwaps({});
+    browser.storage.local.set({ preferredSwaps: {} });
+  }
+
+  const hasAnySwaps = Object.keys(activeSwaps).length > 0;
 
   function escapeRegex(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -496,8 +591,7 @@ export default function App() {
         )}
 
         {/* ── Meta cards ── */}
-        {(recipe.totalTime || recipe.servings > 0) && (
-          <div className="flex flex-wrap gap-3 mb-8">
+        <div className="flex flex-wrap gap-3 mb-8">
             {recipe.totalTime && (
               <div className="flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
                 <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-time-line" /></span>
@@ -554,8 +648,29 @@ export default function App() {
                 </div>
               </div>
             )}
+            {/* Unit toggle */}
+            <div className="no-print flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
+              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-scales-line" /></span>
+              <div>
+                <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Units</p>
+                <div className="flex" style={{ borderRadius: 4, overflow: 'hidden', border: '1px solid var(--border)', marginTop: 2 }}>
+                  {(['imperial', 'metric'] as const).map((sys) => (
+                    <button
+                      key={sys}
+                      onClick={() => { setUnitSystem(sys); browser.storage.local.set({ unitSystem: sys }); }}
+                      style={{
+                        padding: '2px 8px', fontSize: '0.75rem', fontWeight: 600, border: 'none', cursor: 'pointer',
+                        background: unitSystem === sys ? 'var(--primary)' : 'transparent',
+                        color: unitSystem === sys ? 'var(--primary-fg)' : 'var(--muted)',
+                      }}
+                    >
+                      {sys === 'imperial' ? 'IMP' : 'MET'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
-        )}
 
         <hr style={{ border: 'none', borderTop: '1px solid var(--border)', marginBottom: '2rem' }} />
 
@@ -564,20 +679,31 @@ export default function App() {
 
           {/* Ingredients */}
           <div>
-            <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase mb-3" style={{ color: 'var(--muted)' }}>
-              {accentDot}Ingredients
-            </p>
-            {swapsEnriching && (
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 6, marginBottom: '0.75rem',
-                padding: '0.4rem 0.65rem', borderRadius: 6,
-                background: 'var(--muted-bg)', color: 'var(--muted)',
-                fontSize: '0.75rem', fontFamily: "'Inter', sans-serif",
-              }}>
-                <span style={{ display: 'inline-block', width: 10, height: 10, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-                Finding more swaps…
-              </div>
-            )}
+            <div className="flex items-center gap-2 mb-3">
+              <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase" style={{ color: 'var(--muted)', margin: 0 }}>
+                {accentDot}Ingredients
+              </p>
+              {swapsEnriching && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--muted)', fontSize: '0.7rem' }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                </span>
+              )}
+              {hasAnySwaps && !swapsEnriching && (
+                <button
+                  className="no-print"
+                  onClick={handleResetAll}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'var(--muted)', fontSize: '0.7rem', fontWeight: 500,
+                    display: 'inline-flex', alignItems: 'center', gap: 3,
+                    padding: '1px 4px', borderRadius: 4,
+                    marginLeft: 'auto',
+                  }}
+                >
+                  <Ri name="ri-refresh-line" size={11} /> Reset swaps
+                </button>
+              )}
+            </div>
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {recipe.ingredients.map((ing, i) => {
                 const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
@@ -674,11 +800,12 @@ export default function App() {
                     )}
                   </span>
                 ) : <span>{name}</span>;
+                const prepNote = ing.prep;
                 return (
                   <li key={i} className="flex items-start gap-3 rounded-lg text-sm"
                     style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.6rem 0.75rem', lineHeight: 1.45, overflow: 'visible' }}>
                     <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--muted)', opacity: 0.5, flexShrink: 0, marginTop: '0.35rem', display: 'block' }} />
-                    <span>{qty}{unit}{nameEl}</span>
+                    <span>{qty}{unit}{nameEl}{prepNote && <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>, {prepNote}</span>}</span>
                   </li>
                 );
               })}

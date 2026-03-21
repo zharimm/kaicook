@@ -1,4 +1,4 @@
-import { extractRecipe, fetchSwappableIngredients, swapIngredient, type Recipe } from '../utils/extractRecipe';
+import { extractRecipe, fetchNormalizedAndSwaps, swapIngredient, type Recipe } from '../utils/extractRecipe';
 import { parseJsonLdLocally } from '../utils/parseJsonLd';
 
 // In-memory recipe cache keyed by tabId. Cleared when the tab navigates to a new URL.
@@ -76,10 +76,10 @@ export default defineBackground(() => {
       return true;
     }
 
-    if (message.type === 'FETCH_SWAPS') {
+    if (message.type === 'FETCH_NORMALIZE_AND_SWAPS') {
       const { recipe } = message;
-      fetchSwappableIngredients(recipe)
-        .then((swaps) => sendResponse({ swaps }))
+      fetchNormalizedAndSwaps(recipe)
+        .then((result) => sendResponse({ normalizedIngredients: result.normalizedIngredients, swaps: result.swappableIngredients }))
         .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
       return true;
     }
