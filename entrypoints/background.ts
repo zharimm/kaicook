@@ -1,4 +1,4 @@
-import { extractRecipe, type Recipe } from '../utils/extractRecipe';
+import { extractRecipe, swapIngredient, type Recipe } from '../utils/extractRecipe';
 
 // Temporary key verification — remove after debugging
 console.log('[kaiCook] VITE_ANTHROPIC_API_KEY (first 20):', (import.meta.env.VITE_ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
@@ -50,6 +50,14 @@ export default defineBackground(() => {
           sendResponse({ url });
         }
       });
+      return true;
+    }
+
+    if (message.type === 'SWAP_INGREDIENT') {
+      const { ingredientName, substituteName, recipeTitle, recipeSteps } = message;
+      swapIngredient(ingredientName, substituteName, recipeTitle, recipeSteps)
+        .then((result) => sendResponse({ result }))
+        .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
       return true;
     }
 
