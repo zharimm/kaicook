@@ -1,8 +1,5 @@
-import { extractRecipe, type Recipe } from '../utils/extractRecipe';
-
-// Temporary key verification — remove after debugging
-console.log('[kaiCook] VITE_ANTHROPIC_API_KEY (first 20):', (import.meta.env.VITE_ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
-console.log('[kaiCook] ANTHROPIC_API_KEY (first 20):', (import.meta.env.ANTHROPIC_API_KEY as string)?.slice(0, 20) ?? 'undefined');
+import { extractRecipe, fetchNormalizedAndSwaps, swapIngredient, type Recipe } from '../utils/extractRecipe';
+import { parseJsonLdLocally } from '../utils/parseJsonLd';
 
 // In-memory recipe cache keyed by tabId. Cleared when the tab navigates to a new URL.
 const recipeCache = new Map<number, Recipe>();
@@ -10,46 +7,88 @@ const recipeCache = new Map<number, Recipe>();
 async function ensureContentScript(tabId: number): Promise<void> {
   try {
     await browser.tabs.sendMessage(tabId, { type: 'PING' });
-    console.log('[kaiCook] Content script already active');
   } catch {
-    console.log('[kaiCook] Content script not responding — injecting programmatically…');
+    console.log('[kaiCook] Injecting content script…');
     await browser.scripting.executeScript({
       target: { tabId },
       files: ['/content-scripts/content.js'],
     });
-    // Allow the injected script to initialize and register its message listener
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    console.log('[kaiCook] Content script injected');
   }
 }
 
+// ─── URL-based persistent cache ────────────────────────────────────────────────
+const URL_CACHE_KEY = 'recipeUrlCache';
+const URL_CACHE_MAX = 50;
+
+async function getUrlCache(): Promise<Record<string, Recipe>> {
+  const result = await browser.storage.local.get(URL_CACHE_KEY);
+  return (result[URL_CACHE_KEY] as Record<string, Recipe>) ?? {};
+}
+
+async function setUrlCache(url: string, recipe: Recipe): Promise<void> {
+  const cache = await getUrlCache();
+  cache[url] = recipe;
+  // Evict oldest entries if over limit
+  const keys = Object.keys(cache);
+  if (keys.length > URL_CACHE_MAX) {
+    for (const key of keys.slice(0, keys.length - URL_CACHE_MAX)) {
+      delete cache[key];
+    }
+  }
+  await browser.storage.local.set({ [URL_CACHE_KEY]: cache });
+}
+
+// ─── Recipe signal check ──────────────────────────────────────────────────────
+function hasRecipeSignals(text: string): { pass: boolean; count: number } {
+  const lower = text.toLowerCase();
+  const REQUIRED = ['ingredients', 'instructions', 'steps', 'directions'];
+  const SUPPORTING = ['cook', 'bake', 'prep time', 'servings', 'recipe', 'preheat', 'tablespoon', 'teaspoon', 'cup'];
+
+  const hasRequired = REQUIRED.some(kw => lower.includes(kw));
+  const supportCount = SUPPORTING.filter(kw => lower.includes(kw)).length;
+
+  // Must have at least one required signal AND one supporting signal
+  return { pass: hasRequired && supportCount >= 1, count: (hasRequired ? 1 : 0) + supportCount };
+}
+
 export default defineBackground(() => {
-  // Evict cache when a tab navigates to a new URL so stale recipes are never served.
+  // Clear stale URL cache from previous builds (old API-extracted recipes may have raw ISO times)
+  browser.storage.local.remove(URL_CACHE_KEY);
+
+  // Evict in-memory cache when a tab navigates to a new URL.
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.url) {
       recipeCache.delete(tabId);
-      console.log('[kaiCook] Cache cleared for tab', tabId, 'due to navigation');
     }
   });
 
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'GET_TAB_URL') {
       browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
-        console.log('[kaiCook] tabs.query result:', JSON.stringify(tabs));
         const tab = tabs[0];
         const url = tab?.url ?? null;
-        console.log('[kaiCook] tabs[0]:', JSON.stringify(tab));
-        console.log('[kaiCook] tabs[0].url:', url, '— defined?', url !== null && url !== undefined);
-        if (!url) {
-          console.log('[kaiCook] url is undefined — extension may be missing the "tabs" permission, or the tab is a chrome:// page');
-        }
         if (url?.startsWith('chrome-extension://')) {
-          console.log('[kaiCook] Active tab is a chrome-extension:// page — returning kaicook flag');
           sendResponse({ url, kaicook: true });
         } else {
           sendResponse({ url });
         }
       });
+      return true;
+    }
+
+    if (message.type === 'FETCH_NORMALIZE_AND_SWAPS') {
+      const { recipe } = message;
+      fetchNormalizedAndSwaps(recipe)
+        .then((result) => sendResponse({ normalizedIngredients: result.normalizedIngredients, swaps: result.swappableIngredients }))
+        .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === 'SWAP_INGREDIENT') {
+      const { ingredientName, substituteName, recipeTitle, recipeSteps } = message;
+      swapIngredient(ingredientName, substituteName, recipeTitle, recipeSteps)
+        .then((result) => sendResponse({ result }))
+        .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
       return true;
     }
 
@@ -59,10 +98,9 @@ export default defineBackground(() => {
       browser.tabs.query({ active: true, currentWindow: true }).then(async (tabs) => {
         const tab = tabs[0];
         const tabId = tab?.id;
-        console.log('[kaiCook] Active tab:', { id: tabId, url: tab?.url, status: tab?.status });
+        const tabUrl = tab?.url ?? '';
 
         if (!tabId) {
-          console.log('[kaiCook] No active tab ID found');
           sendResponse({ error: 'No active tab found' });
           return;
         }
@@ -70,64 +108,90 @@ export default defineBackground(() => {
         try {
           await ensureContentScript(tabId);
 
-          // Cache hit — skip API call and open the recipe tab immediately
+          // Cache hit — in-memory (per tab)
           const cached = recipeCache.get(tabId);
           if (cached) {
-            console.log('[kaiCook] Cache hit for tab', tabId, '— skipping API call');
-            await browser.storage.session.set({ recipe: cached, recipeSourceUrl: tab.url ?? '' });
+            console.log('[kaiCook] Memory cache hit');
+            await browser.storage.session.set({ recipe: cached, recipeSourceUrl: tabUrl });
             browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
             sendResponse({ recipe: cached });
             return;
           }
 
-          console.log('[kaiCook] Sending GET_PAGE_TEXT to content script…');
-          const contentResponse = await browser.tabs.sendMessage(tabId, { type: 'GET_PAGE_TEXT' });
-          console.log('[kaiCook] Content script response received:', {
-            hasText: !!contentResponse?.text,
-            textLength: contentResponse?.text?.length ?? 0,
-          });
+          // Cache hit — URL-based persistent cache
+          if (tabUrl) {
+            const urlCache = await getUrlCache();
+            if (urlCache[tabUrl]) {
+              console.log('[kaiCook] URL cache hit');
+              const recipe = urlCache[tabUrl];
+              recipeCache.set(tabId, recipe);
+              await browser.storage.session.set({ recipe, recipeSourceUrl: tabUrl });
+              browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
+              sendResponse({ recipe });
+              return;
+            }
+          }
 
+          const contentResponse = await browser.tabs.sendMessage(tabId, { type: 'GET_PAGE_TEXT' });
           const pageText: string = contentResponse?.text ?? '';
-          if (!pageText) {
-            console.log('[kaiCook] Page text is empty — content script may not be injected yet');
+          const jsonLd: string | undefined = contentResponse?.jsonLd;
+          const method: string = contentResponse?.method ?? 'fallback';
+
+          console.log('[kaiCook] Content extraction:', { method, textLength: pageText.length, hasJsonLd: !!jsonLd });
+
+          if (!pageText && !jsonLd) {
             sendResponse({ error: 'Page text is empty. Try reloading the tab.' });
             return;
           }
 
-          // Pre-check: count recipe signals in the first 500 chars of page text.
-          // Avoids burning an API call on pages that clearly aren't recipes.
-          const snippet = pageText.slice(0, 500).toLowerCase();
-          const SIGNALS = ['ingredients', 'instructions', 'steps', 'cook', 'bake', 'prep time', 'servings', 'recipe'];
-          const signalCount = SIGNALS.filter((kw) => snippet.includes(kw)).length;
-          if (signalCount < 2) {
-            const error = signalCount === 0
-              ? "Hey, nice website. But this page has zero calories. 🍽️"
-              : "Almost! This looks like a food site but I can't find a recipe here.";
-            console.log('[kaiCook] Insufficient recipe signals (%d) — skipping API call', signalCount);
-            sendResponse({ error });
-            return;
+          // Fast path: try local JSON-LD parsing first — no API call needed
+          let recipe: Recipe | null = null;
+          if (jsonLd) {
+            console.log('[kaiCook] JSON-LD found, attempting local parse…');
+            recipe = parseJsonLdLocally(jsonLd);
+            if (recipe) {
+              console.log('[kaiCook] ✅ Local parse succeeded — skipping API call:', recipe.title);
+            } else {
+              console.log('[kaiCook] ⚠️ Local parse returned null — falling back to API');
+            }
           }
 
-          console.log('[kaiCook] Calling Anthropic API…');
-          const recipe = await extractRecipe(pageText);
-          console.log('[kaiCook] Recipe extracted successfully:', recipe);
+          // Slow path: fall back to API extraction
+          if (!recipe) {
+            // Pre-check: require recipe signals (skip if we have JSON-LD — that's already confirmed)
+            if (!jsonLd) {
+              const signals = hasRecipeSignals(pageText);
+              if (!signals.pass) {
+                const error = signals.count === 0
+                  ? "Hey, nice website. But this page has zero calories. 🍽️"
+                  : "Almost! This looks like a food site but I can't find a recipe here.";
+                console.log('[kaiCook] Insufficient recipe signals:', signals.count);
+                sendResponse({ error });
+                return;
+              }
+            }
+
+            console.log('[kaiCook] Calling Anthropic API…');
+            recipe = await extractRecipe(pageText, jsonLd);
+          }
+          console.log('[kaiCook] Recipe extracted:', recipe.title);
 
           recipeCache.set(tabId, recipe);
+          if (tabUrl) setUrlCache(tabUrl, recipe);
 
-          // Store in session storage and open the dedicated recipe tab
-          await browser.storage.session.set({ recipe, recipeSourceUrl: tab.url ?? '' });
+          await browser.storage.session.set({ recipe, recipeSourceUrl: tabUrl });
           browser.tabs.create({ url: browser.runtime.getURL('recipe.html') });
 
           sendResponse({ recipe });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          console.error('[kaiCook] Extraction failed at step:', message, err);
-          sendResponse({ error: message });
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error('[kaiCook] Extraction failed:', msg);
+          sendResponse({ error: msg });
         }
       }).catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error('[kaiCook] tabs.query failed:', message, err);
-        sendResponse({ error: `Failed to query active tab: ${message}` });
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[kaiCook] tabs.query failed:', msg);
+        sendResponse({ error: `Failed to query active tab: ${msg}` });
       });
       return true;
     }

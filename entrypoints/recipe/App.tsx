@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Recipe } from '../../utils/extractRecipe';
+import type { Ingredient, Recipe, SwappableIngredient, Substitute } from '../../utils/extractRecipe';
+import { getStaticSwaps } from '../../utils/staticSwaps';
 
 // ─── Remix icon helper ────────────────────────────────────────────────────────
 const Ri = ({ name, size = 16 }: { name: string; size?: number }) => (
   <i className={name} style={{ fontSize: size, lineHeight: 1, display: 'inline-flex', userSelect: 'none' }} />
 );
+
+// ─── Time formatting (handles ISO 8601 durations like PT1H30M) ──────────────
+function formatTime(raw: string): string {
+  // Handles PT1H30M, P0DT0H30M, PT45M, etc.
+  const match = raw.match(/^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return raw;
+  const d = match[1] && match[1] !== '0' ? `${match[1]}d` : '';
+  const h = match[2] && match[2] !== '0' ? `${match[2]}h` : '';
+  const m = match[3] && match[3] !== '0' ? `${match[3]}m` : '';
+  return [d, h, m].filter(Boolean).join(' ') || raw;
+}
 
 // ─── Unit conversion ───────────────────────────────────────────────────────────
 type UnitSystem = 'imperial' | 'metric';
@@ -39,18 +51,16 @@ function fmtQty(n: number): string {
   return parseFloat(n.toFixed(2)).toString();
 }
 
-// ─── Sugar swaps ──────────────────────────────────────────────────────────────
-const SUGAR_SWAPS = [
-  { label: 'Honey', type: 'ratio_change', impact: 'Changes flavour', note: 'Use 75% of the amount and reduce other liquids by 1 tbsp. Adds a floral flavour.' },
-  { label: 'Maple syrup', type: 'flavour_change', impact: 'Changes flavour', note: 'Use same quantity but expect a subtle maple flavour. Works best in bakes and sauces.' },
-  { label: 'Agave nectar', type: 'ratio_change', impact: 'Adjusts recipe', note: 'Use 75% of the amount. Sweeter than sugar with a neutral taste. Reduce oven temperature by 10°C as it browns faster.' },
-  { label: 'Coconut sugar', type: 'safe', impact: 'Safe swap', note: '1:1 replacement. Slightly less sweet with a caramel-like flavour.' },
-];
-
-function swapColor(type: string): string {
-  if (type === 'safe') return '#16a34a';
-  if (type === 'flavour_change') return '#d97706';
-  return '#ea580c';
+// ─── Swap type colors ────────────────────────────────────────────────────────
+function swapTypeBadge(type: Substitute['type']): { label: string; color: string } {
+  switch (type) {
+    case 'safe': return { label: 'Safe swap', color: '#16a34a' };
+    case 'ratio_change': return { label: 'Ratio change', color: '#ea580c' };
+    case 'flavour_change': return { label: 'Flavour change', color: '#d97706' };
+    case 'dietary': return { label: 'Dietary', color: '#c2410c' };
+    case 'availability': return { label: 'Availability', color: '#6366f1' };
+    default: return { label: type, color: '#6b7280' };
+  }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -58,6 +68,14 @@ type State =
   | { status: 'loading' }
   | { status: 'error'; message: string }
   | { status: 'ready'; recipe: Recipe; sourceUrl: string };
+
+interface ActiveSwap {
+  originalName: string;
+  swappedTo: string;
+  note: string;
+  type: Substitute['type'];
+  quantityMultiplier: number | null;
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function App() {
@@ -80,12 +98,23 @@ export default function App() {
   const [ingredientNames, setIngredientNames] = useState<string[]>([]);
   const [stepTexts, setStepTexts] = useState<string[]>([]);
   const [activeSwapIdx, setActiveSwapIdx] = useState<number | null>(null);
-  const [stepNotes, setStepNotes] = useState<Record<number, { note: string; type: string }>>({});
+  const [stepNotes, setStepNotes] = useState<Record<number, { ingIdx: number; name: string; note: string; type: Substitute['type'] }[]>>({});
+  const [activeSwaps, setActiveSwaps] = useState<Record<number, ActiveSwap>>({});
+  const [swapLoading, setSwapLoading] = useState<number | null>(null);
+  const [swapsEnriching, setSwapsEnriching] = useState(false);
+  const [preferredSwaps, setPreferredSwaps] = useState<Record<string, string>>({});
 
   // Sync dark class to <html> so CSS variables flip
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
   }, [dark]);
+
+  // Load preferred swaps from storage
+  useEffect(() => {
+    browser.storage.local.get('preferredSwaps').then((result) => {
+      if (result.preferredSwaps) setPreferredSwaps(result.preferredSwaps as Record<string, string>);
+    });
+  }, []);
 
   // Read recipe + source URL from session storage, and unit preference from local storage
   useEffect(() => {
@@ -100,9 +129,12 @@ export default function App() {
         setState({ status: 'error', message: 'No recipe found. Open a recipe page and click the extension icon.' });
         return;
       }
-      const base = recipe.servings > 0 ? recipe.servings : 1;
+      const parsed = typeof recipe.servings === 'string' ? parseInt(recipe.servings, 10) : recipe.servings;
+      const base = parsed > 0 ? parsed : 1;
+      console.log('[kaiCook] Recipe servings:', recipe.servings, '→ base:', base);
       setBaseServings(base);
       setServings(base);
+      setServingsDraft(String(base));
       setChecked(recipe.ingredients.map(() => true));
       setIngredientNames(recipe.ingredients.map(i => i.name));
       setStepTexts(recipe.steps);
@@ -117,6 +149,112 @@ export default function App() {
       setState({ status: 'error', message: String(err) });
     });
   }, []);
+
+  // Two-phase loading: static swaps (instant) → merged normalize+swap API call (background)
+  useEffect(() => {
+    if (state.status !== 'ready') return;
+    const recipe = state.recipe;
+
+    // Phase 1: apply static swaps immediately (no API call)
+    if (!recipe.swappableIngredients?.length) {
+      const staticSwaps = getStaticSwaps(recipe.ingredients);
+      if (staticSwaps.length) {
+        setState(prev => {
+          if (prev.status !== 'ready') return prev;
+          return { ...prev, recipe: { ...prev.recipe, swappableIngredients: staticSwaps } };
+        });
+        console.log('[kaiCook] Static swaps applied:', staticSwaps.length, 'ingredients');
+      }
+    }
+
+    // Phase 2: merged normalize + swap call — cleans ingredients AND generates swaps in one shot
+    setSwapsEnriching(true);
+    browser.runtime.sendMessage({ type: 'FETCH_NORMALIZE_AND_SWAPS', recipe })
+      .then((response: { normalizedIngredients?: Ingredient[]; swaps?: SwappableIngredient[]; error?: string }) => {
+        if (response?.error) {
+          console.warn('[kaiCook] Normalize+swap failed:', response.error);
+          return;
+        }
+
+        setState(prev => {
+          if (prev.status !== 'ready') return prev;
+          let updatedRecipe = { ...prev.recipe };
+
+          // Build a map of old name → new name for re-keying swaps after normalization
+          const nameChanges = new Map<string, string>();
+
+          // Apply normalized ingredients — update names, quantities, units, prep
+          if (response?.normalizedIngredients?.length) {
+            updatedRecipe = {
+              ...updatedRecipe,
+              ingredients: updatedRecipe.ingredients.map((orig, i) => {
+                const norm = response.normalizedIngredients![i];
+                if (!norm) return orig;
+                if (orig.name.toLowerCase() !== norm.name.toLowerCase()) {
+                  nameChanges.set(orig.name.toLowerCase(), norm.name);
+                }
+                return { ...orig, ...norm };
+              }),
+            };
+            // Also update the displayed ingredient names
+            setIngredientNames(updatedRecipe.ingredients.map(ing => ing.name));
+            console.log('[kaiCook] Ingredients normalized by AI');
+          }
+
+          // Re-key existing swappable entries to match normalized names
+          if (nameChanges.size > 0 && updatedRecipe.swappableIngredients?.length) {
+            updatedRecipe = {
+              ...updatedRecipe,
+              swappableIngredients: updatedRecipe.swappableIngredients.map(si => {
+                const newName = nameChanges.get(si.name.toLowerCase());
+                return newName ? { ...si, name: newName } : si;
+              }),
+            };
+          }
+
+          // Also re-run static swaps with normalized names to catch previously missed matches
+          if (nameChanges.size > 0) {
+            const freshStatic = getStaticSwaps(updatedRecipe.ingredients);
+            const existing = new Set((updatedRecipe.swappableIngredients ?? []).map(s => s.name.toLowerCase()));
+            const newStatic = freshStatic.filter(s => !existing.has(s.name.toLowerCase()));
+            if (newStatic.length > 0) {
+              updatedRecipe = {
+                ...updatedRecipe,
+                swappableIngredients: [...(updatedRecipe.swappableIngredients ?? []), ...newStatic],
+              };
+              console.log('[kaiCook] Fresh static swaps after normalization:', newStatic.length);
+            }
+          }
+
+          // Apply API swaps — merge with any existing static swaps
+          if (response?.swaps?.length) {
+            const current = [...(updatedRecipe.swappableIngredients ?? [])];
+            const existingMap = new Map(current.map((s, i) => [s.name.toLowerCase(), i]));
+
+            for (const apiSwap of response.swaps!) {
+              const key = apiSwap.name.toLowerCase();
+              const idx = existingMap.get(key);
+              if (idx !== undefined) {
+                const existingLabels = new Set(current[idx].substitutes.map(s => s.label.toLowerCase()));
+                const newSubs = apiSwap.substitutes.filter(s => !existingLabels.has(s.label.toLowerCase()));
+                if (newSubs.length > 0) {
+                  current[idx] = { ...current[idx], substitutes: [...current[idx].substitutes, ...newSubs] };
+                }
+              } else {
+                current.push(apiSwap);
+                existingMap.set(key, current.length - 1);
+              }
+            }
+            updatedRecipe = { ...updatedRecipe, swappableIngredients: current };
+            console.log('[kaiCook] AI swaps merged:', current.length, 'ingredients');
+          }
+
+          return { ...prev, recipe: updatedRecipe };
+        });
+      })
+      .catch((err: unknown) => console.warn('[kaiCook] Normalize+swap failed:', err))
+      .finally(() => setSwapsEnriching(false));
+  }, [state.status]);
 
   // Listen for unit preference changes from the popup
   useEffect(() => {
@@ -159,6 +297,14 @@ export default function App() {
   const { recipe, sourceUrl } = state;
   const scale = servings / baseServings;
 
+  // Build a lookup from ingredient name → SwappableIngredient
+  const swappableMap = new Map<string, SwappableIngredient>();
+  if (recipe.swappableIngredients) {
+    for (const si of recipe.swappableIngredients) {
+      swappableMap.set(si.name.toLowerCase(), si);
+    }
+  }
+
   // ── Grocery list helpers ──
   const allChecked = checked.length > 0 && checked.every(Boolean);
 
@@ -178,7 +324,7 @@ export default function App() {
         const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
         const qty = dispQty > 0 ? `${fmtQty(dispQty)} ` : '';
         const unit = dispUnit ? `${dispUnit} ` : '';
-        return `• ${qty}${unit}${ing.name}`;
+        return `• ${qty}${unit}${ingredientNames[recipe.ingredients.indexOf(ing)] ?? ing.name}`;
       });
     navigator.clipboard.writeText(lines.join('\n')).then(() => {
       setListCopied(true);
@@ -192,16 +338,16 @@ export default function App() {
       recipe.title,
       '',
       'INGREDIENTS:',
-      ...recipe.ingredients.map((ing) => {
+      ...recipe.ingredients.map((ing, i) => {
         const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
         const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
         const qty = dispQty > 0 ? `${fmtQty(dispQty)} ` : '';
         const unit = dispUnit ? `${dispUnit} ` : '';
-        return `• ${qty}${unit}${ing.name}`;
+        return `• ${qty}${unit}${ingredientNames[i] ?? ing.name}`;
       }),
       '',
       'STEPS:',
-      ...recipe.steps.map((step, i) => `${i + 1}. ${convertStepTemp(step, unitSystem)}`),
+      ...stepTexts.map((step, i) => `${i + 1}. ${convertStepTemp(step, unitSystem)}`),
       ...(sourceUrl ? ['', `Source: ${sourceUrl}`] : []),
     ].join('\n');
 
@@ -212,23 +358,167 @@ export default function App() {
   }
 
   // ── Swap helpers ──
-  function handleSwap(ingIdx: number, swap: typeof SUGAR_SWAPS[number]) {
-    setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? swap.label : n));
-    const nextSteps = stepTexts.map(s => s.replace(/sugar/gi, swap.label));
-    setStepTexts(nextSteps);
-    const notes: Record<number, { note: string; type: string }> = { ...stepNotes };
-    stepTexts.forEach((s, i) => {
-      if (/sugar/i.test(s)) notes[i] = { note: swap.note, type: swap.type };
+  async function handleSwap(ingIdx: number, sub: Substitute, swappableInfo: SwappableIngredient) {
+    const origName = swappableInfo.name;
+
+    setSwapLoading(ingIdx);
+
+    try {
+      // Call Haiku for impact note
+      const response = await browser.runtime.sendMessage({
+        type: 'SWAP_INGREDIENT',
+        ingredientName: origName,
+        substituteName: sub.label,
+        recipeTitle: recipe.title,
+        recipeSteps: recipe.steps,
+      });
+
+      const aiNote = response?.result?.note ?? sub.note ?? '';
+      const quantityMultiplier = response?.result?.quantityMultiplier ?? sub.ratioChange ?? null;
+
+      // Update ingredient name
+      setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? sub.label : n));
+
+      // Build search patterns: full name + individual words (4+ chars) for compound names
+      // e.g. "granulated sugar" → try "granulated sugar" first, then "sugar", "granulated"
+      const searchTerms = [origName];
+      const currentName = ingredientNames[ingIdx];
+      if (currentName !== origName) searchTerms.push(currentName);
+      // Add individual words from the ingredient name for partial matching in steps
+      const words = origName.split(/\s+/).filter(w => w.length >= 4);
+      for (const word of words) {
+        if (!searchTerms.some(t => t.toLowerCase() === word.toLowerCase())) {
+          searchTerms.push(word);
+        }
+      }
+
+      // Replace in steps — try each search term, use the first that matches per step
+      const nextSteps = stepTexts.map(s => {
+        for (const term of searchTerms) {
+          const r = new RegExp(escapeRegex(term), 'gi');
+          if (r.test(s)) return s.replace(r, sub.label);
+        }
+        return s;
+      });
+      setStepTexts(nextSteps);
+
+      // Find which original steps mention this ingredient (using same search terms)
+      const affectedSteps = new Set<number>();
+      recipe.steps.forEach((s, i) => {
+        for (const term of searchTerms) {
+          if (new RegExp(escapeRegex(term), 'gi').test(s)) {
+            affectedSteps.add(i);
+            break;
+          }
+        }
+      });
+
+      // Stack notes on affected steps
+      setStepNotes(prev => {
+        const next = { ...prev };
+        for (const key of Object.keys(next)) {
+          const k = parseInt(key);
+          next[k] = (next[k] ?? []).filter(n => n.ingIdx !== ingIdx);
+          if (next[k].length === 0) delete next[k];
+        }
+        for (const i of affectedSteps) {
+          next[i] = [...(next[i] ?? []), { ingIdx, name: sub.label, note: aiNote, type: sub.type }];
+        }
+        return next;
+      });
+
+      // Track active swap
+      setActiveSwaps(prev => ({
+        ...prev,
+        [ingIdx]: { originalName: origName, swappedTo: sub.label, note: aiNote, type: sub.type, quantityMultiplier },
+      }));
+
+      // Save preferred swap
+      const nextPreferred = { ...preferredSwaps, [origName]: sub.label };
+      setPreferredSwaps(nextPreferred);
+      browser.storage.local.set({ preferredSwaps: nextPreferred });
+
+    } catch (err) {
+      console.error('[kaiCook] Swap API call failed:', err);
+      // Fallback: still apply swap with pre-existing note
+      setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? sub.label : n));
+      // Use same compound-aware replacement
+      const fallbackTerms = [swappableInfo.name, ...swappableInfo.name.split(/\s+/).filter(w => w.length >= 4)];
+      setStepTexts(prev => prev.map(s => {
+        for (const term of fallbackTerms) {
+          const r = new RegExp(escapeRegex(term), 'gi');
+          if (r.test(s)) return s.replace(r, sub.label);
+        }
+        return s;
+      }));
+      setActiveSwaps(prev => ({
+        ...prev,
+        [ingIdx]: { originalName: origName, swappedTo: sub.label, note: sub.note ?? '', type: sub.type, quantityMultiplier: sub.ratioChange ?? null },
+      }));
+    } finally {
+      setSwapLoading(null);
+      setActiveSwapIdx(null);
+    }
+  }
+
+  function handleRevert(ingIdx: number) {
+    const swap = activeSwaps[ingIdx];
+    if (!swap) return;
+
+    setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? swap.originalName : n));
+
+    // Revert step text: replace the swapped name back to the short form that was in the original step
+    // Find which term was actually used in the original steps (could be a word from compound name)
+    const origWords = swap.originalName.split(/\s+/).filter(w => w.length >= 4);
+    const revertTo = recipe.steps.some(s => new RegExp(escapeRegex(swap.originalName), 'gi').test(s))
+      ? swap.originalName
+      : origWords.find(w => recipe.steps.some(s => new RegExp(escapeRegex(w), 'gi').test(s))) ?? swap.originalName;
+
+    const swapRegex = new RegExp(escapeRegex(swap.swappedTo), 'gi');
+    setStepTexts(prev => prev.map(s => s.replace(swapRegex, revertTo)));
+
+    // Remove only this ingredient's notes from all steps
+    setStepNotes(prev => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        const k = parseInt(key);
+        next[k] = (next[k] ?? []).filter(n => n.ingIdx !== ingIdx);
+        if (next[k].length === 0) delete next[k];
+      }
+      return next;
     });
-    setStepNotes(notes);
+
+    setActiveSwaps(prev => {
+      const next = { ...prev };
+      delete next[ingIdx];
+      return next;
+    });
+
+    // Remove preferred swap
+    const nextPreferred = { ...preferredSwaps };
+    delete nextPreferred[swap.originalName];
+    setPreferredSwaps(nextPreferred);
+    browser.storage.local.set({ preferredSwaps: nextPreferred });
+
     setActiveSwapIdx(null);
   }
 
-  function handleRevert(ingIdx: number, currentLabel: string, origName: string) {
-    setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? origName : n));
-    setStepTexts(prev => prev.map(s => s.replace(new RegExp(currentLabel, 'gi'), origName)));
+  function handleResetAll() {
+    if (state.status !== 'ready') return;
+    // Restore original ingredient names and step texts from the recipe
+    setIngredientNames(state.recipe.ingredients.map(i => i.name));
+    setStepTexts(state.recipe.steps);
+    setActiveSwaps({});
     setStepNotes({});
     setActiveSwapIdx(null);
+    setPreferredSwaps({});
+    browser.storage.local.set({ preferredSwaps: {} });
+  }
+
+  const hasAnySwaps = Object.keys(activeSwaps).length > 0;
+
+  function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   // ── Shared style helpers ──
@@ -301,14 +591,13 @@ export default function App() {
         )}
 
         {/* ── Meta cards ── */}
-        {(recipe.totalTime || recipe.servings > 0) && (
-          <div className="flex flex-wrap gap-3 mb-8">
+        <div className="flex flex-wrap gap-3 mb-8">
             {recipe.totalTime && (
               <div className="flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
                 <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-time-line" /></span>
                 <div>
                   <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Total time</p>
-                  <p className="text-sm font-semibold">{recipe.totalTime}</p>
+                  <p className="text-sm font-semibold">{formatTime(recipe.totalTime)}</p>
                 </div>
               </div>
             )}
@@ -359,8 +648,29 @@ export default function App() {
                 </div>
               </div>
             )}
+            {/* Unit toggle */}
+            <div className="no-print flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
+              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-scales-line" /></span>
+              <div>
+                <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Units</p>
+                <div className="flex" style={{ borderRadius: 4, overflow: 'hidden', border: '1px solid var(--border)', marginTop: 2 }}>
+                  {(['imperial', 'metric'] as const).map((sys) => (
+                    <button
+                      key={sys}
+                      onClick={() => { setUnitSystem(sys); browser.storage.local.set({ unitSystem: sys }); }}
+                      style={{
+                        padding: '2px 8px', fontSize: '0.75rem', fontWeight: 600, border: 'none', cursor: 'pointer',
+                        background: unitSystem === sys ? 'var(--primary)' : 'transparent',
+                        color: unitSystem === sys ? 'var(--primary-fg)' : 'var(--muted)',
+                      }}
+                    >
+                      {sys === 'imperial' ? 'IMP' : 'MET'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
-        )}
 
         <hr style={{ border: 'none', borderTop: '1px solid var(--border)', marginBottom: '2rem' }} />
 
@@ -369,56 +679,113 @@ export default function App() {
 
           {/* Ingredients */}
           <div>
-            <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase mb-3" style={{ color: 'var(--muted)' }}>
-              {accentDot}Ingredients
-            </p>
+            <div className="flex items-center gap-2 mb-3">
+              <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase" style={{ color: 'var(--muted)', margin: 0 }}>
+                {accentDot}Ingredients
+              </p>
+              {swapsEnriching && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--muted)', fontSize: '0.7rem' }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                </span>
+              )}
+              {hasAnySwaps && !swapsEnriching && (
+                <button
+                  className="no-print"
+                  onClick={handleResetAll}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'var(--muted)', fontSize: '0.7rem', fontWeight: 500,
+                    display: 'inline-flex', alignItems: 'center', gap: 3,
+                    padding: '1px 4px', borderRadius: 4,
+                    marginLeft: 'auto',
+                  }}
+                >
+                  <Ri name="ri-refresh-line" size={11} /> Reset swaps
+                </button>
+              )}
+            </div>
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {recipe.ingredients.map((ing, i) => {
                 const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
-                const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
+                const swap = activeSwaps[i];
+                const qtyMultiplier = swap?.quantityMultiplier ?? 1;
+                const adjustedQty = scaled * qtyMultiplier;
+                const { quantity: dispQty, unit: dispUnit } = convertUnit(adjustedQty, ing.unit, unitSystem);
                 const qty = dispQty > 0 ? <strong>{fmtQty(dispQty)} </strong> : null;
                 const unit = dispUnit ? `${dispUnit} ` : '';
                 const name = ingredientNames[i] ?? ing.name;
-                const wasOriginallySwappable = ing.name.toLowerCase().includes('sugar');
-                const hasBeenSwapped = wasOriginallySwappable && !name.toLowerCase().includes('sugar');
-                const isSwappable = wasOriginallySwappable;
-                const nameEl = isSwappable ? (
+                const swappable = swappableMap.get(ing.name.toLowerCase());
+                const isSwappable = !!swappable;
+                const hasBeenSwapped = !!activeSwaps[i];
+                const isLoading = swapLoading === i;
+
+                const pillBg = hasBeenSwapped ? '#fef3c7' : '#dcfce7';
+                const pillColor = hasBeenSwapped ? '#92400e' : '#166534';
+                const pillOutline = hasBeenSwapped ? '1px solid rgba(146, 64, 14, 0.1)' : '1px solid rgba(22, 101, 52, 0.05)';
+
+                const nameEl = isSwappable && swappable ? (
                   <span style={{ position: 'relative', display: 'inline' }} data-swap-popover>
                     <span
                       onClick={() => setActiveSwapIdx(activeSwapIdx === i ? null : i)}
                       className="swap-pill"
-                      style={{ padding: '2px 5px', borderRadius: 4, cursor: 'pointer', display: 'inline', background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)' }}
+                      style={{
+                        padding: '2px 5px', borderRadius: 4, cursor: 'pointer', display: 'inline',
+                        background: pillBg, color: pillColor, outline: pillOutline,
+                      }}
                     >
-                      {name.toLowerCase()}
+                      {isLoading ? '...' : name.toLowerCase()}
                     </span>
                     {activeSwapIdx === i && (
                       <div data-swap-popover style={{
                         position: 'absolute', top: '100%', left: 0, zIndex: 20, marginTop: 6,
                         background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10,
                         padding: '0.6rem 0.7rem', display: 'flex', flexDirection: 'column', gap: '0.5rem',
-                        width: 300, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                        width: 320, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
                       }}>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-                          {[ing.name, ...SUGAR_SWAPS.map(s => s.label)].map(label => {
-                            const isCurrent = label.toLowerCase() === name.toLowerCase();
-                            const isOriginal = label === ing.name;
+                          {/* Original ingredient — always first for revert */}
+                          <span
+                            className={!hasBeenSwapped ? '' : 'swap-chip'}
+                            onClick={hasBeenSwapped ? (e) => { e.stopPropagation(); handleRevert(i); } : undefined}
+                            style={{
+                              padding: '2px 5px', borderRadius: 4, display: 'inline',
+                              fontSize: '0.8125rem', fontWeight: 500,
+                              ...(!hasBeenSwapped
+                                ? { background: 'var(--muted-bg)', color: 'var(--muted)', outline: '1px solid rgba(0,0,0,0.05)', cursor: 'default' }
+                                : { background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)', cursor: 'pointer' }
+                              ),
+                            }}
+                          >
+                            {ing.name.toLowerCase()}
+                          </span>
+                          {/* Substitute chips */}
+                          {swappable.substitutes.map((sub) => {
+                            const isCurrent = hasBeenSwapped && activeSwaps[i].swappedTo.toLowerCase() === sub.label.toLowerCase();
+                            const badge = swapTypeBadge(sub.type);
                             return (
                               <span
-                                key={label}
+                                key={sub.label}
                                 className={isCurrent ? '' : 'swap-chip'}
                                 onClick={isCurrent ? undefined : (e) => {
                                   e.stopPropagation();
-                                  if (isOriginal) handleRevert(i, name, ing.name);
-                                  else handleSwap(i, SUGAR_SWAPS.find(s => s.label === label)!);
+                                  handleSwap(i, sub, swappable);
                                 }}
-                                style={{ padding: '2px 5px', borderRadius: 4, display: 'inline',
+                                style={{
+                                  padding: '2px 5px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
                                   fontSize: '0.8125rem', fontWeight: 500,
                                   ...(isCurrent
                                     ? { background: 'var(--muted-bg)', color: 'var(--muted)', outline: '1px solid rgba(0,0,0,0.05)', cursor: 'default' }
                                     : { background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)', cursor: 'pointer' }
-                                  )}}
+                                  ),
+                                }}
                               >
-                                {label.toLowerCase()}
+                                {sub.label.toLowerCase()}
+                                <span style={{
+                                  fontSize: '0.625rem', fontWeight: 600, color: badge.color,
+                                  background: `${badge.color}15`, padding: '1px 4px', borderRadius: 3,
+                                }}>
+                                  {badge.label}
+                                </span>
                               </span>
                             );
                           })}
@@ -427,17 +794,18 @@ export default function App() {
                         <p style={{ margin: 0, display: 'flex', alignItems: 'flex-start', gap: '0.3rem',
                           fontSize: '0.75rem', color: 'var(--muted)', lineHeight: 1.45 }}>
                           <Ri name="ri-information-line" size={13} />
-                          Some swaps may change the ratio or flavour of your recipe.
+                          Click a substitute to swap. AI will provide specific guidance.
                         </p>
                       </div>
                     )}
                   </span>
                 ) : <span>{name}</span>;
+                const prepNote = ing.prep;
                 return (
                   <li key={i} className="flex items-start gap-3 rounded-lg text-sm"
                     style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.6rem 0.75rem', lineHeight: 1.45, overflow: 'visible' }}>
                     <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--muted)', opacity: 0.5, flexShrink: 0, marginTop: '0.35rem', display: 'block' }} />
-                    <span>{qty}{unit}{nameEl}</span>
+                    <span>{qty}{unit}{nameEl}{prepNote && <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>, {prepNote}</span>}</span>
                   </li>
                 );
               })}
@@ -457,18 +825,36 @@ export default function App() {
                     {i + 1}
                   </span>
                   <div className="flex flex-col" style={{ paddingTop: '0.3rem', flex: 1 }}>
-                    <p style={{ fontSize: '18px', lineHeight: 1.65, fontFamily: "'Lora', serif" }}>{convertStepTemp(step, unitSystem)}</p>
-                    {stepNotes[i] && (
-                      <div style={{
-                        marginTop: '0.6rem', padding: '0.6rem 0.75rem', borderRadius: 8,
-                        outline: '1px solid rgba(22, 101, 52, 0.05)', background: '#dcfce7', color: '#166534',
-                        fontSize: '0.8125rem', lineHeight: 1.55,
-                      }}>
-                        <span style={{
-                          fontSize: '0.7rem', fontWeight: 700, color: '#166534',
-                          marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: "'Inter', sans-serif",
-                        }}><Ri name="ri-sparkling-line" size={12} /> AI note</span>
-                        <span>{stepNotes[i].note}</span>
+                    <p style={{ fontSize: '18px', lineHeight: 1.65, fontFamily: "'Lora', serif" }}>
+                      {convertStepTemp(step, unitSystem)}
+                    </p>
+                    {stepNotes[i]?.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.6rem' }}>
+                        {stepNotes[i].map((sn, ni) => (
+                          <div key={`${i}-${ni}`} style={{
+                            padding: '0.6rem 0.75rem', borderRadius: 8,
+                            ...(sn.type === 'dietary'
+                              ? { outline: '1px solid rgba(194, 65, 12, 0.15)', background: '#fff7ed', color: '#9a3412' }
+                              : { outline: '1px solid rgba(22, 101, 52, 0.05)', background: '#dcfce7', color: '#166534' }
+                            ),
+                            fontSize: '0.8125rem', lineHeight: 1.55,
+                          }}>
+                            <span style={{
+                              fontSize: '0.7rem', fontWeight: 700,
+                              color: sn.type === 'dietary' ? '#9a3412' : '#166534',
+                              marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: "'Inter', sans-serif",
+                            }}>
+                              <Ri name="ri-sparkling-line" size={12} /> {sn.name}
+                              {sn.type === 'dietary' && (
+                                <span style={{
+                                  marginLeft: '0.3rem', fontSize: '0.625rem', fontWeight: 600,
+                                  background: '#fed7aa', color: '#9a3412', padding: '1px 5px', borderRadius: 3,
+                                }}>Dietary swap</span>
+                              )}
+                            </span>
+                            <span>{sn.note}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -538,10 +924,14 @@ export default function App() {
               <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                 {recipe.ingredients.map((ing, i) => {
                   const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
-                  const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
+                  const swap = activeSwaps[i];
+                  const qtyMultiplier = swap?.quantityMultiplier ?? 1;
+                  const adjustedQty = scaled * qtyMultiplier;
+                  const { quantity: dispQty, unit: dispUnit } = convertUnit(adjustedQty, ing.unit, unitSystem);
                   const qty = dispQty > 0 ? `${fmtQty(dispQty)} ` : '';
                   const unit = dispUnit ? `${dispUnit} ` : '';
                   const isChecked = checked[i] ?? true;
+                  const displayName = ingredientNames[i] ?? ing.name;
 
                   return (
                     <li key={i}>
@@ -560,7 +950,7 @@ export default function App() {
                           fontSize: '0.9rem', lineHeight: 1.45,
                           textDecoration: isChecked ? 'none' : 'line-through',
                         }}>
-                          {qty && <strong>{qty}</strong>}{unit}{ing.name}
+                          {qty && <strong>{qty}</strong>}{unit}{displayName}
                         </span>
                       </label>
                     </li>
