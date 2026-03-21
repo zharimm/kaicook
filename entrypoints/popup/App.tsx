@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Recipe } from '../../utils/extractRecipe';
 
 type UnitSystem = 'imperial' | 'metric';
@@ -13,6 +13,7 @@ type State =
 function App() {
   const [state, setState] = useState<State>({ status: 'loading' });
   const [unitSystem, setUnitSystem] = useState<UnitSystem>('imperial');
+  const didExtract = useRef(false);
 
   // Load saved unit preference on mount
   useEffect(() => {
@@ -23,6 +24,8 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (didExtract.current) return;
+    didExtract.current = true;
     console.log('[kaiCook] Popup mounted, requesting tab URL…');
 
     browser.runtime.sendMessage({ type: 'GET_TAB_URL' })
