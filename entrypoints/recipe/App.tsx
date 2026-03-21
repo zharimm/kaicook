@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Recipe, SwappableIngredient, Substitute } from '../../utils/extractRecipe';
+import { getStaticSwaps } from '../../utils/staticSwaps';
 
 // ─── Remix icon helper ────────────────────────────────────────────────────────
 const Ri = ({ name, size = 16 }: { name: string; size?: number }) => (
   <i className={name} style={{ fontSize: size, lineHeight: 1, display: 'inline-flex', userSelect: 'none' }} />
 );
+
+// ─── Time formatting (handles ISO 8601 durations like PT1H30M) ──────────────
+function formatTime(raw: string): string {
+  // Handles PT1H30M, P0DT0H30M, PT45M, etc.
+  const match = raw.match(/^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return raw;
+  const d = match[1] && match[1] !== '0' ? `${match[1]}d` : '';
+  const h = match[2] && match[2] !== '0' ? `${match[2]}h` : '';
+  const m = match[3] && match[3] !== '0' ? `${match[3]}m` : '';
+  return [d, h, m].filter(Boolean).join(' ') || raw;
+}
 
 // ─── Unit conversion ───────────────────────────────────────────────────────────
 type UnitSystem = 'imperial' | 'metric';
@@ -89,6 +101,7 @@ export default function App() {
   const [stepNotes, setStepNotes] = useState<Record<number, { note: string; type: Substitute['type'] }>>({});
   const [activeSwaps, setActiveSwaps] = useState<Record<number, ActiveSwap>>({});
   const [swapLoading, setSwapLoading] = useState<number | null>(null);
+  const [swapsEnriching, setSwapsEnriching] = useState(false);
   const [preferredSwaps, setPreferredSwaps] = useState<Record<string, string>>({});
 
   // Sync dark class to <html> so CSS variables flip
@@ -116,9 +129,12 @@ export default function App() {
         setState({ status: 'error', message: 'No recipe found. Open a recipe page and click the extension icon.' });
         return;
       }
-      const base = recipe.servings > 0 ? recipe.servings : 1;
+      const parsed = typeof recipe.servings === 'string' ? parseInt(recipe.servings, 10) : recipe.servings;
+      const base = parsed > 0 ? parsed : 1;
+      console.log('[kaiCook] Recipe servings:', recipe.servings, '→ base:', base);
       setBaseServings(base);
       setServings(base);
+      setServingsDraft(String(base));
       setChecked(recipe.ingredients.map(() => true));
       setIngredientNames(recipe.ingredients.map(i => i.name));
       setStepTexts(recipe.steps);
@@ -133,6 +149,42 @@ export default function App() {
       setState({ status: 'error', message: String(err) });
     });
   }, []);
+
+  // Two-phase swap loading: static (instant) → API (enriched)
+  useEffect(() => {
+    if (state.status !== 'ready') return;
+    const recipe = state.recipe;
+
+    // Phase 1: apply static swaps immediately (no API call)
+    if (!recipe.swappableIngredients?.length) {
+      const staticSwaps = getStaticSwaps(recipe.ingredients);
+      if (staticSwaps.length) {
+        setState(prev => {
+          if (prev.status !== 'ready') return prev;
+          return { ...prev, recipe: { ...prev.recipe, swappableIngredients: staticSwaps } };
+        });
+        console.log('[kaiCook] Static swaps applied:', staticSwaps.length, 'ingredients');
+      }
+    }
+
+    // Phase 2: fetch API swaps in background, merge any new ones
+    setSwapsEnriching(true);
+    browser.runtime.sendMessage({ type: 'FETCH_SWAPS', recipe })
+      .then((response: { swaps?: SwappableIngredient[]; error?: string }) => {
+        if (!response?.swaps?.length) return;
+        setState(prev => {
+          if (prev.status !== 'ready') return prev;
+          const existing = new Set((prev.recipe.swappableIngredients ?? []).map(s => s.name.toLowerCase()));
+          const newSwaps = response.swaps!.filter(s => !existing.has(s.name.toLowerCase()));
+          if (newSwaps.length === 0) return prev; // API didn't add anything new
+          const merged = [...(prev.recipe.swappableIngredients ?? []), ...newSwaps];
+          console.log('[kaiCook] API swaps merged:', newSwaps.length, 'new ingredients');
+          return { ...prev, recipe: { ...prev.recipe, swappableIngredients: merged } };
+        });
+      })
+      .catch((err: unknown) => console.warn('[kaiCook] Failed to load API swaps:', err))
+      .finally(() => setSwapsEnriching(false));
+  }, [state.status]);
 
   // Listen for unit preference changes from the popup
   useEffect(() => {
@@ -350,55 +402,6 @@ export default function App() {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  // Render text with swappable ingredient names as pills
-  function renderTextWithPills(text: string, isStep: boolean = false): React.ReactNode {
-    if (!recipe.swappableIngredients?.length) return text;
-
-    // Build regex matching all swappable names + their current swapped names
-    const names: string[] = [];
-    for (const [idx, ing] of recipe.ingredients.entries()) {
-      const swappable = swappableMap.get(ing.name.toLowerCase());
-      if (!swappable) continue;
-      const currentName = ingredientNames[idx];
-      names.push(escapeRegex(currentName));
-      if (currentName !== ing.name) names.push(escapeRegex(ing.name));
-    }
-
-    if (!names.length) return text;
-
-    const regex = new RegExp(`(${names.join('|')})`, 'gi');
-    const parts = text.split(regex);
-
-    return parts.map((part, i) => {
-      // Check if this part matches a swappable ingredient
-      const matchIdx = recipe.ingredients.findIndex((ing, idx) => {
-        const currentName = ingredientNames[idx];
-        return swappableMap.has(ing.name.toLowerCase()) &&
-          (part.toLowerCase() === currentName.toLowerCase() || part.toLowerCase() === ing.name.toLowerCase());
-      });
-
-      if (matchIdx === -1) return <span key={i}>{part}</span>;
-
-      const hasSwap = !!activeSwaps[matchIdx];
-      const pillBg = hasSwap ? '#fef3c7' : '#dcfce7';
-      const pillColor = hasSwap ? '#92400e' : '#166534';
-
-      if (isStep) {
-        // In steps, pills are visual-only (not clickable)
-        return (
-          <span
-            key={i}
-            style={{ background: pillBg, color: pillColor, borderRadius: 4, padding: '2px 5px', display: 'inline' }}
-          >
-            {part.toLowerCase()}
-          </span>
-        );
-      }
-
-      return <span key={i}>{part}</span>;
-    });
-  }
-
   // ── Shared style helpers ──
   const iconBtnStyle: React.CSSProperties = {
     background: 'transparent', border: 'none', cursor: 'pointer',
@@ -476,7 +479,7 @@ export default function App() {
                 <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-time-line" /></span>
                 <div>
                   <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Total time</p>
-                  <p className="text-sm font-semibold">{recipe.totalTime}</p>
+                  <p className="text-sm font-semibold">{formatTime(recipe.totalTime)}</p>
                 </div>
               </div>
             )}
@@ -539,6 +542,12 @@ export default function App() {
           <div>
             <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase mb-3" style={{ color: 'var(--muted)' }}>
               {accentDot}Ingredients
+              {swapsEnriching && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 400, fontSize: '0.65rem', letterSpacing: 'normal', textTransform: 'none', color: 'var(--muted)', opacity: 0.7 }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                  finding swaps…
+                </span>
+              )}
             </p>
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {recipe.ingredients.map((ing, i) => {
@@ -661,7 +670,7 @@ export default function App() {
                   </span>
                   <div className="flex flex-col" style={{ paddingTop: '0.3rem', flex: 1 }}>
                     <p style={{ fontSize: '18px', lineHeight: 1.65, fontFamily: "'Lora', serif" }}>
-                      {renderTextWithPills(convertStepTemp(step, unitSystem), true)}
+                      {convertStepTemp(step, unitSystem)}
                     </p>
                     {stepNotes[i] && (
                       <div style={{
