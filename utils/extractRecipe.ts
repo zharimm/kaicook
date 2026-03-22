@@ -155,35 +155,21 @@ export async function fetchNormalizedAndSwaps(recipe: Recipe): Promise<Normalize
     withTimeout(
       client.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2500,
-        system: `You are a cooking assistant. You receive a recipe's ingredient list that was auto-parsed from a website. The parsing is often messy — ingredient names may contain embedded quantities, mixed units (imperial + metric), prep instructions, or qualifiers.
+        max_tokens: 1800,
+        system: `You are a cooking assistant. Normalize recipe ingredients and suggest substitutes.
 
-Your job: (1) normalize each ingredient, and (2) suggest substitutes for swappable ones. Return ONLY a valid JSON object — no markdown, no explanation, no code block.
-
-Shape:
+Return ONLY valid JSON:
 {
-  "ingredients": [
-    { "index": number, "name": string, "quantity": number, "unit": string, "prep": string | null }
-  ],
-  "swaps": [
-    { "index": number, "substitutes": [{ "label": string, "type": "safe" | "ratio_change" | "flavour_change" | "dietary" | "availability", "ratioChange": number | null, "note": string }] }
-  ]
+  "ingredients": [{ "index": number, "name": string, "quantity": number, "unit": string, "prep": string | null }],
+  "swaps": [{ "index": number, "substitutes": [{ "label": string, "type": "safe" | "ratio_change" | "flavour_change" | "dietary" | "availability", "ratioChange": number | null, "note": string }] }]
 }
 
-Normalization rules:
-- "name" = clean ingredient name only (e.g. "all-purpose flour", not "2 cups (256g) all-purpose flour")
-- Strip parenthetical unit conversions from name (e.g. "(256g)", "(about 2 cups)")
-- Separate prep instructions into "prep" (e.g. "finely chopped", "room temperature", "beaten")
-- Remove qualifiers only if they don't change the ingredient identity ("large" egg → prep: null, but "smoked paprika" stays)
-- Fix quantity and unit if the original parse was wrong (e.g. if "1" was parsed but name has "14.5 oz can" → quantity: 1, unit: "can", name: "diced tomatoes", prep: "14.5 oz")
-- Pick one unit system — prefer the primary one used in the recipe. Drop the duplicate.
-- quantity must be a number (0 if truly unknown), unit can be ""
-
-Swap rules:
-- Only include ingredients with meaningful, common substitutes
-- 2-3 substitutes per ingredient
-- type: "safe" = 1:1 drop-in, "ratio_change" = different amount, "flavour_change" = alters taste, "dietary" = allergen/diet swap, "availability" = hard-to-find alternative
-- ratioChange: multiplier vs original (e.g. 0.75 = use 75%), null if 1:1
+Rules:
+- name: clean ingredient name only, strip parentheticals like "(256g)" or "(about 2 cups)"
+- prep: separate instructions like "finely chopped" or "room temperature"
+- quantity: number (0 if unknown), unit: canonical form or ""
+- swaps: 2-3 common substitutes per ingredient, only if meaningful
+- ratioChange: multiplier (0.75 = 75%), null if 1:1
 - note: 1 sentence on impact`,
         messages: [{
           role: 'user',
