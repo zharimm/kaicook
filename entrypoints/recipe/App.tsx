@@ -85,7 +85,6 @@ interface PerfData {
   t3?: number;
   t4?: number;
   t5?: number;
-  t6?: number;
 }
 
 type EnrichPhase = 'idle' | 'cleaning' | 'polishing' | 'done';
@@ -109,6 +108,10 @@ export default function App() {
   const perfRef = useRef<PerfData>({});
   const [perfOpen, setPerfOpen] = useState(false);
 
+  // AI Assistant toggle and enrichment phases
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [enrichPhase, setEnrichPhase] = useState<EnrichPhase>('idle');
+
   // Swap state
   const [ingredientNames, setIngredientNames] = useState<string[]>([]);
   const [stepTexts, setStepTexts] = useState<string[]>([]);
@@ -119,23 +122,15 @@ export default function App() {
   const [swapsEnriching, setSwapsEnriching] = useState(false);
   const [preferredSwaps, setPreferredSwaps] = useState<Record<string, string>>({});
 
-  // AI Assistant toggle and enrichment phases
-  const [aiEnabled, setAiEnabled] = useState(false);
-  const [enrichPhase, setEnrichPhase] = useState<EnrichPhase>('idle');
-
   // Sync dark class to <html> so CSS variables flip
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
   }, [dark]);
 
-  // Load preferred swaps and AI toggle from storage
+  // Load preferred swaps from storage
   useEffect(() => {
-    Promise.all([
-      browser.storage.local.get('preferredSwaps'),
-      browser.storage.local.get('aiAssistant'),
-    ]).then(([psResult, aiResult]) => {
-      if (psResult.preferredSwaps) setPreferredSwaps(psResult.preferredSwaps as Record<string, string>);
-      if (aiResult.aiAssistant !== undefined) setAiEnabled(aiResult.aiAssistant as boolean);
+    browser.storage.local.get('preferredSwaps').then((result) => {
+      if (result.preferredSwaps) setPreferredSwaps(result.preferredSwaps as Record<string, string>);
     });
   }, []);
 
@@ -162,37 +157,33 @@ export default function App() {
       setServingsDraft(String(base));
       setChecked(recipe.ingredients.map(() => true));
 
-      // Phase 1: Immediately show recipe with cleaned labels
-      const cleaned = cleanIngredientLabels(recipe.ingredients);
-      setIngredientNames(cleaned.map(i => i.name));
-      setStepTexts(recipe.steps);
-      document.title = `${recipe.title} — kaiCook`;
-
-      perfRef.current.t1 = performance.now();
+      // Phase 1: Clean labels locally (instant), then display
       setEnrichPhase('cleaning');
-
-      // Update recipe with cleaned ingredients
+      const cleaned = cleanIngredientLabels(recipe.ingredients);
       const cleanedRecipe: Recipe = { ...recipe, ingredients: cleaned };
+      perfRef.current.t1 = performance.now();
+
+      setIngredientNames(cleaned.map(i => i.name));
+      setStepTexts(cleanedRecipe.steps);
+      document.title = `${cleanedRecipe.title} — kaiCook`;
       setState({ status: 'ready', recipe: cleanedRecipe, sourceUrl: (sessionResult.recipeSourceUrl as string) ?? '' });
+
+      perfRef.current.t2 = performance.now();
 
       const savedSystem = localResult?.unitSystem as UnitSystem | undefined;
       if (savedSystem === 'imperial' || savedSystem === 'metric') {
         setUnitSystem(savedSystem);
       }
-
-      // Record cleaned phase completion
-      perfRef.current.t3 = performance.now();
     }).catch((err: unknown) => {
       setState({ status: 'error', message: String(err) });
     });
   }, []);
 
-  // Phase 2: Apply static swaps immediately (non-interactive)
+  // Phase 2: Apply static swaps immediately (non-interactive until AI enabled)
   useEffect(() => {
     if (state.status !== 'ready') return;
     const recipe = state.recipe;
 
-    // Apply static swaps (pulsating, non-clickable)
     if (!recipe.swappableIngredients?.length) {
       const staticSwaps = getStaticSwaps(recipe.ingredients);
       if (staticSwaps.length) {
@@ -201,35 +192,31 @@ export default function App() {
           return { ...prev, recipe: { ...prev.recipe, swappableIngredients: staticSwaps } };
         });
         console.log('[kaiCook] Static swaps applied:', staticSwaps.length, 'ingredients');
-        perfRef.current.t2 = performance.now();
+        perfRef.current.t3 = performance.now();
       }
     }
 
-    // Reset enrichment phase after static swaps are applied
     setEnrichPhase('idle');
   }, [state.status]);
 
-  // Phase 3: AI Assistant toggle — triggers API call or hides swaps
+  // Phase 3: AI Assistant toggle — triggers API call when enabled
   useEffect(() => {
     if (state.status !== 'ready') return;
     const recipe = state.recipe;
 
     if (!aiEnabled) {
-      // AI is OFF: static swaps remain pulsating/non-clickable, no API call
       console.log('[kaiCook] AI Assistant disabled');
       setEnrichPhase('idle');
       return;
     }
 
-    // AI is ON: fire the API call
     perfRef.current.t4 = performance.now();
     setEnrichPhase('polishing');
     setSwapsEnriching(true);
-    perfRef.current.t5 = performance.now();
 
     browser.runtime.sendMessage({ type: 'FETCH_NORMALIZE_AND_SWAPS', recipe })
       .then((response: { normalizedIngredients?: Ingredient[]; swaps?: SwappableIngredient[]; error?: string }) => {
-        perfRef.current.t6 = performance.now();
+        perfRef.current.t5 = performance.now();
 
         if (response?.error) {
           console.warn('[kaiCook] Normalize+swap failed:', response.error);
@@ -257,7 +244,6 @@ export default function App() {
                 return { ...orig, ...norm };
               }),
             };
-            // Also update the displayed ingredient names
             setIngredientNames(updatedRecipe.ingredients.map(ing => ing.name));
             console.log('[kaiCook] Ingredients normalized by AI');
           }
@@ -273,7 +259,7 @@ export default function App() {
             };
           }
 
-          // Also re-run static swaps with normalized names to catch previously missed matches
+          // Re-run static swaps with normalized names
           if (nameChanges.size > 0) {
             const freshStatic = getStaticSwaps(updatedRecipe.ingredients);
             const existing = new Set((updatedRecipe.swappableIngredients ?? []).map(s => s.name.toLowerCase()));
@@ -343,7 +329,7 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handler);
   }, [activeSwapIdx]);
 
-  // Setup performance widget global
+  // Expose perf data globally for debugging
   useEffect(() => {
     (window as any).__kaiPerf = perfRef.current;
   }, []);
@@ -368,7 +354,7 @@ export default function App() {
   const scale = servings / baseServings;
 
   // Build a lookup from ingredient name → SwappableIngredient
-  // Show interactive swaps only if AI is enabled AND done enriching
+  // Interactive swaps only available when AI is enabled and done enriching
   const swappableMap = new Map<string, SwappableIngredient>();
   if (recipe.swappableIngredients && aiEnabled && enrichPhase === 'done') {
     for (const si of recipe.swappableIngredients) {
@@ -376,13 +362,38 @@ export default function App() {
     }
   }
 
-  // For static swaps display (pulsating): show if any static swaps exist
-  const staticSwappableMap = new Map<string, SwappableIngredient>();
-  if (recipe.swappableIngredients) {
+  // Static swap presence map (for pulsating pills when AI is off)
+  const staticSwappableSet = new Set<string>();
+  if (recipe.swappableIngredients && !aiEnabled) {
     for (const si of recipe.swappableIngredients) {
-      staticSwappableMap.set(si.name.toLowerCase(), si);
+      staticSwappableSet.add(si.name.toLowerCase());
     }
   }
+
+  // Format perf data for display
+  function formatPerfData(): Array<{ phase: string; delta: string }> {
+    const times: Array<[string, number | undefined]> = [
+      ['Load', perfRef.current.t0],
+      ['Labels cleaned', perfRef.current.t1],
+      ['Recipe displayed', perfRef.current.t2],
+      ['Static swaps', perfRef.current.t3],
+      ['AI toggled', perfRef.current.t4],
+      ['API returned', perfRef.current.t5],
+    ];
+    let prev: number | undefined;
+    return times
+      .filter(([_, t]) => t !== undefined)
+      .map(([label, t]) => {
+        if (!t) return { phase: label, delta: '' };
+        const deltaMs = prev !== undefined ? (t - prev).toFixed(0) : '0';
+        prev = t;
+        return { phase: label, delta: `+${deltaMs}ms` };
+      });
+  }
+
+  const perfData = formatPerfData();
+  const totalTime = perfRef.current.t5 && perfRef.current.t0 ? ((perfRef.current.t5 - perfRef.current.t0) / 1000).toFixed(2) : '';
+  const apiCallTime = perfRef.current.t5 && perfRef.current.t4 ? ((perfRef.current.t5 - perfRef.current.t4) / 1000).toFixed(2) : '';
 
   // ── Grocery list helpers ──
   const allChecked = checked.length > 0 && checked.every(Boolean);
@@ -459,9 +470,11 @@ export default function App() {
       setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? sub.label : n));
 
       // Build search patterns: full name + individual words (4+ chars) for compound names
+      // e.g. "granulated sugar" → try "granulated sugar" first, then "sugar", "granulated"
       const searchTerms = [origName];
       const currentName = ingredientNames[ingIdx];
       if (currentName !== origName) searchTerms.push(currentName);
+      // Add individual words from the ingredient name for partial matching in steps
       const words = origName.split(/\s+/).filter(w => w.length >= 4);
       for (const word of words) {
         if (!searchTerms.some(t => t.toLowerCase() === word.toLowerCase())) {
@@ -479,7 +492,7 @@ export default function App() {
       });
       setStepTexts(nextSteps);
 
-      // Find which original steps mention this ingredient
+      // Find which original steps mention this ingredient (using same search terms)
       const affectedSteps = new Set<number>();
       recipe.steps.forEach((s, i) => {
         for (const term of searchTerms) {
@@ -519,6 +532,7 @@ export default function App() {
       console.error('[kaiCook] Swap API call failed:', err);
       // Fallback: still apply swap with pre-existing note
       setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? sub.label : n));
+      // Use same compound-aware replacement
       const fallbackTerms = [swappableInfo.name, ...swappableInfo.name.split(/\s+/).filter(w => w.length >= 4)];
       setStepTexts(prev => prev.map(s => {
         for (const term of fallbackTerms) {
@@ -529,11 +543,8 @@ export default function App() {
       }));
       setActiveSwaps(prev => ({
         ...prev,
-        [ingIdx]: { originalName: swappableInfo.name, swappedTo: sub.label, note: sub.note ?? '', type: sub.type, quantityMultiplier: sub.ratioChange ?? null },
+        [ingIdx]: { originalName: origName, swappedTo: sub.label, note: sub.note ?? '', type: sub.type, quantityMultiplier: sub.ratioChange ?? null },
       }));
-      const nextPreferred = { ...preferredSwaps, [swappableInfo.name]: sub.label };
-      setPreferredSwaps(nextPreferred);
-      browser.storage.local.set({ preferredSwaps: nextPreferred });
     } finally {
       setSwapLoading(null);
       setActiveSwapIdx(null);
@@ -546,7 +557,8 @@ export default function App() {
 
     setIngredientNames(prev => prev.map((n, i) => i === ingIdx ? swap.originalName : n));
 
-    // Revert step text
+    // Revert step text: replace the swapped name back to the short form that was in the original step
+    // Find which term was actually used in the original steps (could be a word from compound name)
     const origWords = swap.originalName.split(/\s+/).filter(w => w.length >= 4);
     const revertTo = recipe.steps.some(s => new RegExp(escapeRegex(swap.originalName), 'gi').test(s))
       ? swap.originalName
@@ -614,34 +626,6 @@ export default function App() {
   const accentDot = (
     <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)', display: 'inline-block', flexShrink: 0 }} />
   );
-
-  // Format perf data for display
-  function formatPerfData(): Array<{ phase: string; time: string; delta: string }> {
-    const times: Array<[string, number | undefined]> = [
-      ['Load', perfRef.current.t0],
-      ['Recipe displayed', perfRef.current.t1],
-      ['Static swaps', perfRef.current.t2],
-      ['Labels cleaned', perfRef.current.t3],
-      ['AI toggled', perfRef.current.t4],
-      ['API started', perfRef.current.t5],
-      ['API returned', perfRef.current.t6],
-    ];
-
-    let prev: number | undefined;
-    return times
-      .filter(([_, t]) => t !== undefined)
-      .map(([label, t]) => {
-        if (!t) return { phase: label, time: '', delta: '' };
-        const absTime = new Date(t).toLocaleTimeString();
-        const deltaMs = prev !== undefined ? (t - prev).toFixed(0) : '0';
-        prev = t;
-        return { phase: label, time: absTime, delta: `+${deltaMs}ms` };
-      });
-  }
-
-  const perfData = formatPerfData();
-  const totalTime = perfRef.current.t6 && perfRef.current.t0 ? ((perfRef.current.t6 - perfRef.current.t0) / 1000).toFixed(2) : '';
-  const apiCallTime = perfRef.current.t6 && perfRef.current.t5 ? ((perfRef.current.t6 - perfRef.current.t5) / 1000).toFixed(2) : '';
 
   return (
     <div style={{ background: 'var(--bg)', color: 'var(--fg)', minHeight: '100vh', fontFamily: "'Inter', sans-serif", fontSize: '14px' }}>
@@ -754,49 +738,63 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div className="flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
-              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-sparkling-line" size={16} /></span>
+            {/* Unit toggle */}
+            <div className="no-print flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
+              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-scales-line" /></span>
+              <div>
+                <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>Units</p>
+                <div className="flex" style={{ borderRadius: 4, overflow: 'hidden', border: '1px solid var(--border)', marginTop: 2 }}>
+                  {(['imperial', 'metric'] as const).map((sys) => (
+                    <button
+                      key={sys}
+                      onClick={() => { setUnitSystem(sys); browser.storage.local.set({ unitSystem: sys }); }}
+                      style={{
+                        padding: '2px 8px', fontSize: '0.75rem', fontWeight: 600, border: 'none', cursor: 'pointer',
+                        background: unitSystem === sys ? 'var(--primary)' : 'transparent',
+                        color: unitSystem === sys ? 'var(--primary-fg)' : 'var(--muted)',
+                      }}
+                    >
+                      {sys === 'imperial' ? 'IMP' : 'MET'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {/* AI Assistant toggle */}
+            <div className="no-print flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
+              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-sparkling-line" /></span>
               <div>
                 <p className="text-xs" style={{ color: 'var(--muted)', marginBottom: 2 }}>AI Assistant</p>
                 <button
-                  className="no-print"
-                  onClick={() => {
-                    const next = !aiEnabled;
-                    setAiEnabled(next);
-                    browser.storage.local.set({ aiAssistant: next });
-                  }}
+                  onClick={() => setAiEnabled(prev => !prev)}
                   style={{
                     background: aiEnabled ? 'var(--accent)' : 'var(--muted-bg)',
                     color: aiEnabled ? 'white' : 'var(--fg)',
-                    border: 'none',
-                    borderRadius: 4,
-                    padding: '0.3rem 0.6rem',
-                    fontSize: '0.75rem',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    textTransform: 'uppercase',
-                    transition: 'all 0.2s',
+                    border: 'none', borderRadius: 4, padding: '2px 8px',
+                    fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
+                    textTransform: 'uppercase', transition: 'all 0.2s', marginTop: 2,
                   }}
                 >
                   {aiEnabled ? 'On' : 'Off'}
                 </button>
               </div>
             </div>
-            <div className="flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
-              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-equalizer-line" size={16} /></span>
+            {/* Perf widget toggle */}
+            <div className="no-print flex items-center gap-3 rounded-lg" style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.65rem 0.9rem' }}>
+              <span style={{ color: 'var(--muted)', display: 'flex' }}><Ri name="ri-equalizer-line" /></span>
               <button
-                className="no-print text-xs font-semibold"
                 onClick={() => setPerfOpen(!perfOpen)}
+                className="text-xs font-semibold"
                 style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--accent)', padding: 0 }}
               >
                 {perfOpen ? 'Hide' : 'Perf'}
               </button>
             </div>
-        </div>
+          </div>
 
         {/* ── Performance widget ── */}
         {perfOpen && (
-          <div className="no-print mb-6 p-4 rounded-lg" style={{ background: 'var(--muted-bg)', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+          <div className="no-print mb-4 p-4 rounded-lg" style={{ background: 'var(--muted-bg)', fontSize: '0.75rem', fontFamily: 'monospace' }}>
             <div className="font-semibold mb-2" style={{ color: 'var(--fg)' }}>Performance Timeline</div>
             <div style={{ color: 'var(--muted)', lineHeight: 1.6 }}>
               {perfData.map((row, i) => (
@@ -811,315 +809,332 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Recipe sections ── */}
+        <hr style={{ border: 'none', borderTop: '1px solid var(--border)', marginBottom: '2rem' }} />
+
+        {/* ── Ingredients + Steps ── */}
         <div className="recipe-sections">
 
-          {/* ── Ingredients column ── */}
-          <section>
-            <div className="flex items-center gap-2 mb-4">
-              <h2 className="text-lg font-semibold">Ingredients</h2>
+          {/* Ingredients */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase" style={{ color: 'var(--muted)', margin: 0 }}>
+                {accentDot}Ingredients
+              </p>
               {enrichPhase === 'cleaning' && (
-                <div className="flex items-center gap-1">
-                  <div className="w-3 h-3 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />
-                  <span className="text-xs" style={{ color: 'var(--muted)' }}>Cleaning labels...</span>
-                </div>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--muted)', fontSize: '0.7rem' }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                  Cleaning labels...
+                </span>
               )}
               {enrichPhase === 'polishing' && (
-                <div className="flex items-center gap-1">
-                  <div className="w-3 h-3 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />
-                  <span className="text-xs" style={{ color: 'var(--muted)' }}>Polishing...</span>
-                </div>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--muted)', fontSize: '0.7rem' }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, border: '1.5px solid var(--muted)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                  Polishing...
+                </span>
+              )}
+              {hasAnySwaps && !swapsEnriching && (
+                <button
+                  className="no-print"
+                  onClick={handleResetAll}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'var(--muted)', fontSize: '0.7rem', fontWeight: 500,
+                    display: 'inline-flex', alignItems: 'center', gap: 3,
+                    padding: '1px 4px', borderRadius: 4,
+                    marginLeft: 'auto',
+                  }}
+                >
+                  <Ri name="ri-refresh-line" size={11} /> Reset swaps
+                </button>
               )}
             </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
               {recipe.ingredients.map((ing, i) => {
                 const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
-                const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
-                const qty = dispQty > 0 ? `${fmtQty(dispQty)} ` : '';
-                const unit = dispUnit ? `${dispUnit} ` : '';
-
-                // Check if this ingredient has a swap
-                const swappable = swappableMap.get(ingredientNames[i]?.toLowerCase() ?? ing.name.toLowerCase());
-                const hasSwap = i in activeSwaps;
                 const swap = activeSwaps[i];
+                const qtyMultiplier = swap?.quantityMultiplier ?? 1;
+                const adjustedQty = scaled * qtyMultiplier;
+                const { quantity: dispQty, unit: dispUnit } = convertUnit(adjustedQty, ing.unit, unitSystem);
+                const qty = dispQty > 0 ? <strong>{fmtQty(dispQty)} </strong> : null;
+                const unit = dispUnit ? `${dispUnit} ` : '';
+                const name = ingredientNames[i] ?? ing.name;
+                const swappable = swappableMap.get(ing.name.toLowerCase());
+                const isSwappable = !!swappable;
+                const hasStaticSwap = staticSwappableSet.has(ing.name.toLowerCase());
+                const hasBeenSwapped = !!activeSwaps[i];
+                const isLoading = swapLoading === i;
 
-                // Check if it has a static swap (for pulsating display)
-                const hasStaticSwap = staticSwappableMap.has(ingredientNames[i]?.toLowerCase() ?? ing.name.toLowerCase());
+                const pillBg = hasBeenSwapped ? '#fef3c7' : '#dcfce7';
+                const pillColor = hasBeenSwapped ? '#92400e' : '#166534';
+                const pillOutline = hasBeenSwapped ? '1px solid rgba(146, 64, 14, 0.1)' : '1px solid rgba(22, 101, 52, 0.05)';
 
-                return (
-                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
-                    <input
-                      type="checkbox"
-                      checked={checked[i] ?? true}
-                      onChange={() => toggleItem(i)}
-                      className="no-print"
-                      style={{ marginTop: '0.35rem', cursor: 'pointer', accentColor: 'var(--accent)' }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <span style={{ opacity: checked[i] ? 1 : 0.5 }}>
-                        {qty}{unit}{ingredientNames[i] ?? ing.name}
-                      </span>
-                      {ing.prep && <span style={{ color: 'var(--muted)', fontSize: '0.85em', marginLeft: '0.25rem' }}>({ing.prep})</span>}
-                      {hasSwap && swap && (
-                        <div className="no-print" style={{ marginTop: '0.25rem', fontSize: '0.85em', color: 'var(--accent)' }}>
-                          {accentDot} Swapped to <strong>{swap.swappedTo}</strong>
-                          <button
-                            onClick={() => handleRevert(i)}
-                            className="btn-text"
-                            style={{ marginLeft: '0.5rem', color: 'var(--muted)', fontSize: 'inherit', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-                          >
-                            (revert)
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    {!hasSwap && swappable && aiEnabled && enrichPhase === 'done' && (
-                      <button
-                        onClick={() => setActiveSwapIdx(i)}
-                        className="no-print btn-action"
-                        style={{
-                          background: '#16a34a', color: 'white',
-                          border: 'none', borderRadius: 4, padding: '0.25rem 0.5rem',
-                          fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
-                          textTransform: 'uppercase', flexShrink: 0,
-                        }}
-                      >
-                        Swap
-                      </button>
-                    )}
-                    {!hasSwap && hasStaticSwap && !aiEnabled && (
-                      <div
-                        className="swap-pill-pending"
-                        style={{
-                          background: '#16a34a', color: 'white',
-                          borderRadius: 4, padding: '0.25rem 0.5rem',
-                          fontSize: '0.75rem', fontWeight: 600,
-                          flexShrink: 0,
-                        }}
-                      >
-                        Swaps
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {hasAnySwaps && aiEnabled && (
-              <button
-                onClick={handleResetAll}
-                className="no-print btn-text mt-4 text-xs"
-                style={{ color: 'var(--muted)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-              >
-                Reset all swaps
-              </button>
-            )}
-          </section>
-
-          {/* ── Swap popover (modal on top of ingredient) ── */}
-          {activeSwapIdx !== null && (
-            <div
-              data-swap-popover
-              className="no-print fixed inset-0 flex items-center justify-center"
-              style={{ background: 'rgba(0, 0, 0, 0.5)', zIndex: 50 }}
-              onClick={() => setActiveSwapIdx(null)}
-            >
-              <div
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  background: 'var(--card)', borderRadius: 8, padding: '1.5rem',
-                  maxWidth: 400, width: '90%', border: '1px solid var(--border)',
-                }}
-              >
-                <div className="mb-4">
-                  <h3 className="font-semibold mb-1">Swap ingredient</h3>
-                  <p style={{ color: 'var(--muted)', fontSize: '0.9em' }}>
-                    {recipe.ingredients[activeSwapIdx]?.name}
-                  </p>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', maxHeight: 400, overflowY: 'auto' }}>
-                  {swappableMap.get(ingredientNames[activeSwapIdx]?.toLowerCase() ?? recipe.ingredients[activeSwapIdx]?.name.toLowerCase())?.substitutes.map((sub, si) => (
-                    <button
-                      key={si}
-                      onClick={() => handleSwap(activeSwapIdx, sub, swappableMap.get(ingredientNames[activeSwapIdx]?.toLowerCase() ?? recipe.ingredients[activeSwapIdx]?.name.toLowerCase())!)}
-                      disabled={swapLoading === activeSwapIdx}
-                      className="btn-action text-left no-print"
+                // Pulsating pill when AI is off but static swap exists
+                const nameEl = hasStaticSwap && !isSwappable ? (
+                  <span
+                    className="swap-pill-pending"
+                    style={{
+                      padding: '2px 5px', borderRadius: 4, display: 'inline',
+                      background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)',
+                    }}
+                  >
+                    {name.toLowerCase()}
+                  </span>
+                ) : isSwappable && swappable ? (
+                  <span style={{ position: 'relative', display: 'inline' }} data-swap-popover>
+                    <span
+                      onClick={() => setActiveSwapIdx(activeSwapIdx === i ? null : i)}
+                      className="swap-pill"
                       style={{
-                        background: 'var(--muted-bg)', border: '1px solid var(--border)',
-                        borderRadius: 6, padding: '0.75rem', cursor: swapLoading === activeSwapIdx ? 'default' : 'pointer',
-                        opacity: swapLoading === activeSwapIdx ? 0.6 : 1,
+                        padding: '2px 5px', borderRadius: 4, cursor: 'pointer', display: 'inline',
+                        background: pillBg, color: pillColor, outline: pillOutline,
                       }}
                     >
-                      <div className="font-medium text-sm mb-1">{sub.label}</div>
-                      <div style={{ color: 'var(--muted)', fontSize: '0.8em', marginBottom: '0.5rem' }}>
-                        <span style={{
-                          display: 'inline-block', background: swapTypeBadge(sub.type).color,
-                          color: 'white', padding: '0.15rem 0.5rem', borderRadius: 3,
-                          fontSize: '0.7em', fontWeight: 600, marginRight: '0.5rem',
-                        }}>
-                          {swapTypeBadge(sub.type).label}
-                        </span>
-                        {sub.ratioChange && sub.ratioChange !== 1 && (
-                          <span style={{ fontSize: '0.75em', color: 'var(--accent)' }}>
-                            {Math.round(sub.ratioChange * 100)}%
+                      {isLoading ? '...' : name.toLowerCase()}
+                    </span>
+                    {activeSwapIdx === i && (
+                      <div data-swap-popover style={{
+                        position: 'absolute', top: '100%', left: 0, zIndex: 20, marginTop: 6,
+                        background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10,
+                        padding: '0.6rem 0.7rem', display: 'flex', flexDirection: 'column', gap: '0.5rem',
+                        width: 320, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                      }}>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                          {/* Original ingredient — always first for revert */}
+                          <span
+                            className={!hasBeenSwapped ? '' : 'swap-chip'}
+                            onClick={hasBeenSwapped ? (e) => { e.stopPropagation(); handleRevert(i); } : undefined}
+                            style={{
+                              padding: '2px 5px', borderRadius: 4, display: 'inline',
+                              fontSize: '0.8125rem', fontWeight: 500,
+                              ...(!hasBeenSwapped
+                                ? { background: 'var(--muted-bg)', color: 'var(--muted)', outline: '1px solid rgba(0,0,0,0.05)', cursor: 'default' }
+                                : { background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)', cursor: 'pointer' }
+                              ),
+                            }}
+                          >
+                            {ing.name.toLowerCase()}
                           </span>
-                        )}
-                      </div>
-                      {sub.note && <div style={{ fontSize: '0.8em', color: 'var(--muted)', lineHeight: 1.4 }}>{sub.note}</div>}
-                      {swapLoading === activeSwapIdx && (
-                        <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75em', color: 'var(--muted)' }}>
-                          <div className="w-2 h-2 rounded-full border border-gray-400 border-t-transparent animate-spin" />
-                          Processing...
+                          {/* Substitute chips */}
+                          {swappable.substitutes.map((sub) => {
+                            const isCurrent = hasBeenSwapped && activeSwaps[i].swappedTo.toLowerCase() === sub.label.toLowerCase();
+                            const badge = swapTypeBadge(sub.type);
+                            return (
+                              <span
+                                key={sub.label}
+                                className={isCurrent ? '' : 'swap-chip'}
+                                onClick={isCurrent ? undefined : (e) => {
+                                  e.stopPropagation();
+                                  handleSwap(i, sub, swappable);
+                                }}
+                                style={{
+                                  padding: '2px 5px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                                  fontSize: '0.8125rem', fontWeight: 500,
+                                  ...(isCurrent
+                                    ? { background: 'var(--muted-bg)', color: 'var(--muted)', outline: '1px solid rgba(0,0,0,0.05)', cursor: 'default' }
+                                    : { background: '#dcfce7', color: '#166534', outline: '1px solid rgba(22, 101, 52, 0.05)', cursor: 'pointer' }
+                                  ),
+                                }}
+                              >
+                                {sub.label.toLowerCase()}
+                                <span style={{
+                                  fontSize: '0.625rem', fontWeight: 600, color: badge.color,
+                                  background: `${badge.color}15`, padding: '1px 4px', borderRadius: 3,
+                                }}>
+                                  {badge.label}
+                                </span>
+                              </span>
+                            );
+                          })}
                         </div>
-                      )}
-                    </button>
-                  ))}
-                </div>
+                        <hr style={{ margin: 0, border: 'none', borderTop: '1px solid var(--border)' }} />
+                        <p style={{ margin: 0, display: 'flex', alignItems: 'flex-start', gap: '0.3rem',
+                          fontSize: '0.75rem', color: 'var(--muted)', lineHeight: 1.45 }}>
+                          <Ri name="ri-information-line" size={13} />
+                          Click a substitute to swap. AI will provide specific guidance.
+                        </p>
+                      </div>
+                    )}
+                  </span>
+                ) : <span>{name}</span>;
+                const prepNote = ing.prep;
+                return (
+                  <li key={i} className="flex items-start gap-3 rounded-lg text-sm"
+                    style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '0.6rem 0.75rem', lineHeight: 1.45, overflow: 'visible' }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--muted)', opacity: 0.5, flexShrink: 0, marginTop: '0.35rem', display: 'block' }} />
+                    <span>{qty}{unit}{nameEl}{prepNote && <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>, {prepNote}</span>}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
 
-                <button
-                  onClick={() => setActiveSwapIdx(null)}
-                  className="btn-text mt-4 w-full"
-                  style={{ color: 'var(--muted)', background: 'none', border: '1px solid var(--border)', borderRadius: 4, padding: '0.5rem', cursor: 'pointer' }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── Steps column ── */}
-          <section>
-            <h2 className="text-lg font-semibold mb-4">Steps</h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              {stepTexts.map((step, i) => (
-                <div key={i}>
-                  <div className="flex gap-3">
-                    <div
-                      className="btn-step no-print"
-                      style={{ ...stepBtnStyle, flexShrink: 0, background: 'var(--accent)', color: 'white' }}
-                    >
-                      {i + 1}
-                    </div>
-                    <p style={{ flex: 1, lineHeight: 1.6 }}>
+          {/* Steps */}
+          <div>
+            <p className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase mb-3" style={{ color: 'var(--muted)' }}>
+              {accentDot}Steps
+            </p>
+            <ol style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {(stepTexts.length ? stepTexts : recipe.steps).map((step, i) => (
+                <li key={i} className="flex items-start gap-4">
+                  <span className="flex items-center justify-center shrink-0 text-xs font-bold rounded-full"
+                    style={{ width: '2rem', height: '2rem', background: 'var(--primary)', color: 'var(--primary-fg)' }}>
+                    {i + 1}
+                  </span>
+                  <div className="flex flex-col" style={{ paddingTop: '0.3rem', flex: 1 }}>
+                    <p style={{ fontSize: '18px', lineHeight: 1.65, fontFamily: "'Lora', serif" }}>
                       {convertStepTemp(step, unitSystem)}
                     </p>
-                  </div>
-                  {stepNotes[i]?.map((note, ni) => (
-                    <div key={ni} className="no-print" style={{ marginLeft: '2.5rem', marginTop: '0.5rem', fontSize: '0.9em', padding: '0.5rem 0.75rem', background: 'var(--muted-bg)', borderRadius: 4 }}>
-                      <div style={{ color: 'var(--accent)', fontWeight: 600, marginBottom: '0.25rem' }}>
-                        {accentDot} {note.name}
+                    {stepNotes[i]?.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.6rem' }}>
+                        {stepNotes[i].map((sn, ni) => (
+                          <div key={`${i}-${ni}`} style={{
+                            padding: '0.6rem 0.75rem', borderRadius: 8,
+                            ...(sn.type === 'dietary'
+                              ? { outline: '1px solid rgba(194, 65, 12, 0.15)', background: '#fff7ed', color: '#9a3412' }
+                              : { outline: '1px solid rgba(22, 101, 52, 0.05)', background: '#dcfce7', color: '#166534' }
+                            ),
+                            fontSize: '0.8125rem', lineHeight: 1.55,
+                          }}>
+                            <span style={{
+                              fontSize: '0.7rem', fontWeight: 700,
+                              color: sn.type === 'dietary' ? '#9a3412' : '#166534',
+                              marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: "'Inter', sans-serif",
+                            }}>
+                              <Ri name="ri-sparkling-line" size={12} /> {sn.name}
+                              {sn.type === 'dietary' && (
+                                <span style={{
+                                  marginLeft: '0.3rem', fontSize: '0.625rem', fontWeight: 600,
+                                  background: '#fed7aa', color: '#9a3412', padding: '1px 5px', borderRadius: 3,
+                                }}>Dietary swap</span>
+                              )}
+                            </span>
+                            <span>{sn.note}</span>
+                          </div>
+                        ))}
                       </div>
-                      <div style={{ color: 'var(--muted)' }}>{note.note}</div>
-                    </div>
-                  ))}
-                </div>
+                    )}
+                  </div>
+                </li>
               ))}
-            </div>
-          </section>
-
+            </ol>
+          </div>
         </div>
 
-        {/* ── Grocery list modal ── */}
-        {groceryOpen && (
-          <div
-            className="no-print fixed inset-0 flex items-center justify-center"
-            style={{ background: 'rgba(0, 0, 0, 0.5)', zIndex: 50 }}
-            onClick={() => setGroceryOpen(false)}
-          >
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                background: 'var(--card)', borderRadius: 8, padding: '1.5rem',
-                maxWidth: 500, width: '90%', maxHeight: '80vh', overflowY: 'auto', border: '1px solid var(--border)',
-              }}
-            >
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-lg">Grocery List</h3>
-                <button
-                  onClick={() => setGroceryOpen(false)}
-                  className="btn-icon"
-                  style={iconBtnStyle}
-                  aria-label="Close"
-                >
-                  <Ri name="ri-close-line" size={18} />
-                </button>
-              </div>
-
-              <div className="mb-4 flex gap-2">
-                <button
-                  onClick={toggleAll}
-                  className="btn-action text-xs px-2 py-1 rounded"
-                  style={{ background: 'var(--muted-bg)', border: 'none', cursor: 'pointer' }}
-                >
-                  {allChecked ? 'Uncheck All' : 'Check All'}
-                </button>
-                <button
-                  onClick={copyGroceryList}
-                  className="btn-action text-xs px-2 py-1 rounded flex items-center gap-1"
-                  style={{ background: 'var(--muted-bg)', border: 'none', cursor: 'pointer' }}
-                >
-                  {listCopied ? <Ri name="ri-check-line" size={12} /> : <Ri name="ri-file-copy-line" size={12} />}
-                  {listCopied ? 'Copied!' : 'Copy'}
-                </button>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                {recipe.ingredients.map((ing, i) => {
-                  const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
-                  const { quantity: dispQty, unit: dispUnit } = convertUnit(scaled, ing.unit, unitSystem);
-                  const qty = dispQty > 0 ? `${fmtQty(dispQty)} ` : '';
-                  const unit = dispUnit ? `${dispUnit} ` : '';
-                  return (
-                    <label key={i} className="grocery-label flex items-start gap-3 p-2 rounded" style={{ background: 'var(--muted-bg)', cursor: 'pointer' }}>
-                      <input
-                        type="checkbox"
-                        checked={checked[i] ?? true}
-                        onChange={() => toggleItem(i)}
-                        style={{ marginTop: '0.35rem', cursor: 'pointer', accentColor: 'var(--accent)' }}
-                      />
-                      <span style={{ flex: 1 }}>
-                        <span style={{ opacity: checked[i] ? 1 : 0.5 }}>
-                          {qty}{unit}{ingredientNames[i] ?? ing.name}
-                        </span>
-                        {ing.prep && <span style={{ color: 'var(--muted)', fontSize: '0.85em', marginLeft: '0.25rem' }}>({ing.prep})</span>}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-
-              <button
-                onClick={() => setGroceryOpen(false)}
-                className="btn-text mt-4 w-full"
-                style={{ color: 'var(--muted)', background: 'none', border: '1px solid var(--border)', borderRadius: 4, padding: '0.5rem', cursor: 'pointer' }}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ── Source link ── */}
+        {/* ── Source ── */}
         {sourceUrl && (
-          <div className="no-print mt-8 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
-            <p style={{ fontSize: '0.85em', color: 'var(--muted)' }}>
-              Source:{' '}
-              <a
-                href={sourceUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="source-link"
-                style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-              >
-                {sourceUrl}
-              </a>
-            </p>
+          <div className="mt-10 pt-6" style={{ borderTop: '1px solid var(--border)' }}>
+            <a
+              href={sourceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="source-link inline-flex items-center gap-2 text-sm"
+              style={{ color: 'var(--muted)', textDecoration: 'none' }}
+            >
+              <Ri name="ri-external-link-line" size={14} />
+              View original recipe
+            </a>
           </div>
         )}
 
       </div>
+
+      {/* ── Grocery List panel ── */}
+      {groceryOpen && (
+        <div className="no-print" style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', justifyContent: 'flex-end' }}>
+          {/* Backdrop */}
+          <div
+            style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.35)' }}
+            onClick={() => setGroceryOpen(false)}
+          />
+
+          {/* Drawer */}
+          <div style={{
+            position: 'relative', width: 380, maxWidth: '100vw',
+            background: 'var(--bg)', borderLeft: '1px solid var(--border)',
+            display: 'flex', flexDirection: 'column', height: '100%',
+          }}>
+
+            {/* Panel header */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '1.25rem 1.25rem 1rem',
+              borderBottom: '1px solid var(--border)',
+            }}>
+              <span style={{ fontSize: '0.875rem', fontWeight: 700 }}>Grocery List</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <button
+                  onClick={toggleAll}
+                  className="btn-text"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--accent)', fontWeight: 500, padding: 0 }}
+                >
+                  {allChecked ? 'Deselect all' : 'Select all'}
+                </button>
+                <button className="btn-icon" style={iconBtnStyle} onClick={() => setGroceryOpen(false)} aria-label="Close grocery list">
+                  <Ri name="ri-close-line" />
+                </button>
+              </div>
+            </div>
+
+            {/* Ingredient checklist */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '0.75rem 1.25rem' }}>
+              <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                {recipe.ingredients.map((ing, i) => {
+                  const scaled = ing.quantity > 0 ? ing.quantity * scale : 0;
+                  const swap = activeSwaps[i];
+                  const qtyMultiplier = swap?.quantityMultiplier ?? 1;
+                  const adjustedQty = scaled * qtyMultiplier;
+                  const { quantity: dispQty, unit: dispUnit } = convertUnit(adjustedQty, ing.unit, unitSystem);
+                  const qty = dispQty > 0 ? `${fmtQty(dispQty)} ` : '';
+                  const unit = dispUnit ? `${dispUnit} ` : '';
+                  const isChecked = checked[i] ?? true;
+                  const displayName = ingredientNames[i] ?? ing.name;
+
+                  return (
+                    <li key={i}>
+                      <label className="grocery-label" style={{
+                        display: 'flex', alignItems: 'center', gap: '0.75rem',
+                        padding: '0.6rem 0.5rem', borderRadius: 8, cursor: 'pointer',
+                        opacity: isChecked ? 1 : 0.4,
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleItem(i)}
+                          style={{ width: 16, height: 16, accentColor: 'var(--accent)', flexShrink: 0, cursor: 'pointer' }}
+                        />
+                        <span style={{
+                          fontSize: '0.9rem', lineHeight: 1.45,
+                          textDecoration: isChecked ? 'none' : 'line-through',
+                        }}>
+                          {qty && <strong>{qty}</strong>}{unit}{displayName}
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+
+            {/* Panel footer */}
+            <div style={{ padding: '1rem 1.25rem', borderTop: '1px solid var(--border)' }}>
+              <button
+                className="btn-primary"
+                onClick={copyGroceryList}
+                style={{
+                  width: '100%', padding: '0.65rem', borderRadius: 8,
+                  background: 'var(--primary)', color: 'var(--primary-fg)',
+                  border: 'none', cursor: 'pointer',
+                  fontSize: '0.875rem', fontWeight: 600,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
+                }}
+              >
+                {listCopied ? <><Ri name="ri-check-line" size={15} /> Copied!</> : <><Ri name="ri-file-copy-line" size={15} /> Copy list</>}
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }

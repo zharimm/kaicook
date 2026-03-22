@@ -98,16 +98,12 @@ function cleanIngredient(ingredient: Ingredient): Ingredient {
   // Phase 2: Split on comma for prep notes
   const { name: cleanName, prep: newPrep } = splitPrepNotes(name);
 
-  // Phase 3: Normalize unit
-  const unit = normalizeUnit(ingredient.unit);
-
   // Use new prep only if we didn't already have one
   const prep = ingredient.prep || newPrep;
 
   return {
     ...ingredient,
     name: cleanName,
-    unit,
     prep: prep && prep.length > 0 ? prep : undefined,
   };
 }
