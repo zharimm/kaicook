@@ -137,43 +137,32 @@ export async function extractRecipe(pageText: string, jsonLd?: string): Promise<
   return recipe;
 }
 
-/** Merged normalize + swap: one API call that cleans up messy ingredient data AND generates substitutes */
-export interface NormalizeAndSwapResult {
-  normalizedIngredients: Ingredient[];
+/** Swap-only API call: generates substitutes for ingredients not covered by static swaps */
+export interface SwapOnlyResult {
   swappableIngredients: SwappableIngredient[];
 }
 
-export async function fetchNormalizedAndSwaps(recipe: Recipe): Promise<NormalizeAndSwapResult> {
+export async function fetchAISwaps(
+  recipeTitle: string,
+  ingredients: { index: number; name: string }[],
+): Promise<SwapOnlyResult> {
   const client = getClient();
 
-  // Build a compact ingredient list showing what we parsed locally
-  const ingredientList = recipe.ingredients.map((ing, i) =>
-    `${i}: qty=${ing.quantity} unit="${ing.unit}" name="${ing.name}"`
-  ).join('\n');
+  if (ingredients.length === 0) return { swappableIngredients: [] };
+
+  const ingredientList = ingredients.map(ing => `${ing.index}: ${ing.name}`).join('\n');
 
   const response = await callWithRetry(() =>
     withTimeout(
       client.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1800,
-        system: `You are a cooking assistant. Normalize recipe ingredients and suggest substitutes.
-
-Return ONLY valid JSON:
-{
-  "ingredients": [{ "index": number, "name": string, "quantity": number, "unit": string, "prep": string | null }],
-  "swaps": [{ "index": number, "substitutes": [{ "label": string, "type": "safe" | "ratio_change" | "flavour_change" | "dietary" | "availability", "ratioChange": number | null, "note": string }] }]
-}
-
-Rules:
-- name: clean ingredient name only, strip parentheticals like "(256g)" or "(about 2 cups)"
-- prep: separate instructions like "finely chopped" or "room temperature"
-- quantity: number (0 if unknown), unit: canonical form or ""
-- swaps: 2-3 common substitutes per ingredient, only if meaningful
-- ratioChange: multiplier (0.75 = 75%), null if 1:1
-- note: 1 sentence on impact`,
+        max_tokens: 1024,
+        system: `Suggest 2 substitutes per ingredient. Return ONLY JSON array:
+[{"index":number,"substitutes":[{"label":string,"type":"safe"|"dietary"|"ratio_change"|"flavour_change","ratioChange":number|null,"note":string}]}]
+ratioChange: multiplier vs original (null if 1:1). note: max 10 words.`,
         messages: [{
           role: 'user',
-          content: `Recipe: "${recipe.title}" (${recipe.servings} servings)\n\nIngredients:\n${ingredientList}`,
+          content: `"${recipeTitle}"\n${ingredientList}`,
         }],
       }),
       API_TIMEOUT_MS,
@@ -182,30 +171,14 @@ Rules:
 
   const text = response.content[0].type === 'text' ? response.content[0].text : '';
   const clean = text.replace(/^```json\s*/, '').replace(/```\s*$/, '').trim();
-  const parsed = JSON.parse(clean);
+  const parsed: Array<{ index: number; substitutes: Substitute[] }> = JSON.parse(clean);
 
-  // Map normalized ingredients back, preserving original text
-  const normalizedIngredients: Ingredient[] = recipe.ingredients.map((orig, i) => {
-    const norm = parsed.ingredients?.find((n: { index: number }) => n.index === i);
-    if (!norm) return orig;
-    return {
-      name: norm.name || orig.name,
-      quantity: typeof norm.quantity === 'number' ? norm.quantity : orig.quantity,
-      unit: norm.unit ?? orig.unit,
-      prep: norm.prep || undefined,
-      originalText: orig.name !== norm.name ? orig.name : undefined,
-    };
-  });
+  const swappableIngredients: SwappableIngredient[] = parsed.map(entry => ({
+    name: ingredients.find(i => i.index === entry.index)?.name ?? '',
+    substitutes: entry.substitutes,
+  }));
 
-  // Map swaps to use normalized names
-  const swappableIngredients: SwappableIngredient[] = (parsed.swaps ?? []).map(
-    (s: { index: number; substitutes: Substitute[] }) => ({
-      name: normalizedIngredients[s.index]?.name ?? recipe.ingredients[s.index]?.name ?? '',
-      substitutes: s.substitutes,
-    })
-  );
-
-  return { normalizedIngredients, swappableIngredients };
+  return { swappableIngredients };
 }
 
 export interface SwapResult {
