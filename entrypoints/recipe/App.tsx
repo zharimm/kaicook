@@ -199,7 +199,7 @@ export default function App() {
     setEnrichPhase('idle');
   }, [state.status]);
 
-  // Phase 3: AI Assistant toggle — triggers API call when enabled
+  // Phase 3: AI Assistant toggle — only fetches swaps for ingredients without static matches
   useEffect(() => {
     if (state.status !== 'ready') return;
     const recipe = state.recipe;
@@ -210,98 +210,64 @@ export default function App() {
       return;
     }
 
+    // Build list of ingredients NOT already covered by static swaps
+    const staticNames = new Set(
+      (recipe.swappableIngredients ?? []).map(si => si.name.toLowerCase())
+    );
+    const unmatchedIngredients = recipe.ingredients
+      .map((ing, i) => ({ index: i, name: ing.name }))
+      .filter(ing => !staticNames.has(ing.name.toLowerCase()));
+
+    console.log('[kaiCook] AI: sending', unmatchedIngredients.length, 'of', recipe.ingredients.length, 'ingredients (rest covered by static)');
+
+    // If all ingredients have static swaps, skip the API call entirely
+    if (unmatchedIngredients.length === 0) {
+      console.log('[kaiCook] All ingredients covered by static swaps — skipping API');
+      setEnrichPhase('done');
+      return;
+    }
+
     perfRef.current.t4 = performance.now();
     setEnrichPhase('polishing');
     setSwapsEnriching(true);
 
-    browser.runtime.sendMessage({ type: 'FETCH_NORMALIZE_AND_SWAPS', recipe })
-      .then((response: { normalizedIngredients?: Ingredient[]; swaps?: SwappableIngredient[]; error?: string }) => {
+    browser.runtime.sendMessage({
+      type: 'FETCH_AI_SWAPS',
+      recipeTitle: recipe.title,
+      ingredients: unmatchedIngredients,
+    })
+      .then((response: { swaps?: SwappableIngredient[]; error?: string }) => {
         perfRef.current.t5 = performance.now();
 
         if (response?.error) {
-          console.warn('[kaiCook] Normalize+swap failed:', response.error);
+          console.warn('[kaiCook] AI swap failed:', response.error);
           setEnrichPhase('done');
           return;
         }
 
-        setState(prev => {
-          if (prev.status !== 'ready') return prev;
-          let updatedRecipe = { ...prev.recipe };
-
-          // Build a map of old name → new name for re-keying swaps after normalization
-          const nameChanges = new Map<string, string>();
-
-          // Apply normalized ingredients — update names, quantities, units, prep
-          if (response?.normalizedIngredients?.length) {
-            updatedRecipe = {
-              ...updatedRecipe,
-              ingredients: updatedRecipe.ingredients.map((orig, i) => {
-                const norm = response.normalizedIngredients![i];
-                if (!norm) return orig;
-                if (orig.name.toLowerCase() !== norm.name.toLowerCase()) {
-                  nameChanges.set(orig.name.toLowerCase(), norm.name);
-                }
-                return { ...orig, ...norm };
-              }),
-            };
-            setIngredientNames(updatedRecipe.ingredients.map(ing => ing.name));
-            console.log('[kaiCook] Ingredients normalized by AI');
-          }
-
-          // Re-key existing swappable entries to match normalized names
-          if (nameChanges.size > 0 && updatedRecipe.swappableIngredients?.length) {
-            updatedRecipe = {
-              ...updatedRecipe,
-              swappableIngredients: updatedRecipe.swappableIngredients.map(si => {
-                const newName = nameChanges.get(si.name.toLowerCase());
-                return newName ? { ...si, name: newName } : si;
-              }),
-            };
-          }
-
-          // Re-run static swaps with normalized names
-          if (nameChanges.size > 0) {
-            const freshStatic = getStaticSwaps(updatedRecipe.ingredients);
-            const existing = new Set((updatedRecipe.swappableIngredients ?? []).map(s => s.name.toLowerCase()));
-            const newStatic = freshStatic.filter(s => !existing.has(s.name.toLowerCase()));
-            if (newStatic.length > 0) {
-              updatedRecipe = {
-                ...updatedRecipe,
-                swappableIngredients: [...(updatedRecipe.swappableIngredients ?? []), ...newStatic],
-              };
-              console.log('[kaiCook] Fresh static swaps after normalization:', newStatic.length);
-            }
-          }
-
-          // Apply API swaps — merge with any existing static swaps
-          if (response?.swaps?.length) {
-            const current = [...(updatedRecipe.swappableIngredients ?? [])];
+        // Merge AI swaps with existing static swaps
+        if (response?.swaps?.length) {
+          setState(prev => {
+            if (prev.status !== 'ready') return prev;
+            const current = [...(prev.recipe.swappableIngredients ?? [])];
             const existingMap = new Map(current.map((s, i) => [s.name.toLowerCase(), i]));
 
             for (const apiSwap of response.swaps!) {
               const key = apiSwap.name.toLowerCase();
-              const idx = existingMap.get(key);
-              if (idx !== undefined) {
-                const existingLabels = new Set(current[idx].substitutes.map(s => s.label.toLowerCase()));
-                const newSubs = apiSwap.substitutes.filter(s => !existingLabels.has(s.label.toLowerCase()));
-                if (newSubs.length > 0) {
-                  current[idx] = { ...current[idx], substitutes: [...current[idx].substitutes, ...newSubs] };
-                }
-              } else {
+              if (!existingMap.has(key)) {
                 current.push(apiSwap);
-                existingMap.set(key, current.length - 1);
               }
             }
-            updatedRecipe = { ...updatedRecipe, swappableIngredients: current };
-            console.log('[kaiCook] AI swaps merged:', current.length, 'ingredients');
-          }
 
-          setEnrichPhase('done');
-          return { ...prev, recipe: updatedRecipe };
-        });
+            console.log('[kaiCook] AI swaps merged: total', current.length, 'ingredients');
+            return { ...prev, recipe: { ...prev.recipe, swappableIngredients: current } };
+          });
+        }
+
+        setEnrichPhase('done');
       })
       .catch((err: unknown) => {
-        console.warn('[kaiCook] Normalize+swap failed:', err);
+        console.warn('[kaiCook] AI swap failed:', err);
         setEnrichPhase('done');
       })
       .finally(() => setSwapsEnriching(false));
