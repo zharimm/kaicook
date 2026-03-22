@@ -362,11 +362,11 @@ export default function App() {
     }
   }
 
-  // Static swap presence map (for pulsating pills when AI is off)
-  const staticSwappableSet = new Set<string>();
-  if (recipe.swappableIngredients && !aiEnabled) {
+  // Pulsating pills: show when AI is on but still processing
+  const pendingSwapSet = new Set<string>();
+  if (recipe.swappableIngredients && aiEnabled && enrichPhase !== 'done') {
     for (const si of recipe.swappableIngredients) {
-      staticSwappableSet.add(si.name.toLowerCase());
+      pendingSwapSet.add(si.name.toLowerCase());
     }
   }
 
@@ -860,7 +860,7 @@ export default function App() {
                 const name = ingredientNames[i] ?? ing.name;
                 const swappable = swappableMap.get(ing.name.toLowerCase());
                 const isSwappable = !!swappable;
-                const hasStaticSwap = staticSwappableSet.has(ing.name.toLowerCase());
+                const hasPendingSwap = pendingSwapSet.has(ing.name.toLowerCase());
                 const hasBeenSwapped = !!activeSwaps[i];
                 const isLoading = swapLoading === i;
 
@@ -868,8 +868,8 @@ export default function App() {
                 const pillColor = hasBeenSwapped ? '#92400e' : '#166534';
                 const pillOutline = hasBeenSwapped ? '1px solid rgba(146, 64, 14, 0.1)' : '1px solid rgba(22, 101, 52, 0.05)';
 
-                // Pulsating pill when AI is off but static swap exists
-                const nameEl = hasStaticSwap && !isSwappable ? (
+                // Pulsating pill when AI is on but still processing
+                const nameEl = hasPendingSwap && !isSwappable ? (
                   <span
                     className="swap-pill-pending"
                     style={{
