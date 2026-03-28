@@ -11,6 +11,29 @@
   --accent:       #4f46e5;
   --primary:      #1a1a1a;
   --primary-fg:   #ffffff;
+
+  /* Swap pills — safe (green) */
+  --swap-bg:          #dcfce7;
+  --swap-fg:          #166534;
+  --swap-outline:     rgba(22, 101, 52, 0.05);
+  /* Swap pills — swapped state (amber) */
+  --swap-active-bg:   #fef3c7;
+  --swap-active-fg:   #92400e;
+  /* AI notes — dietary (orange) */
+  --note-dietary-bg:      #fff7ed;
+  --note-dietary-fg:      #9a3412;
+  --note-dietary-outline: rgba(194, 65, 12, 0.15);
+  --note-dietary-badge:   #fed7aa;
+  /* AI notes — safe (green) */
+  --note-safe-bg:         #dcfce7;
+  --note-safe-fg:         #166534;
+  --note-safe-outline:    rgba(22, 101, 52, 0.05);
+  /* Swap type badges */
+  --badge-safe:           #16a34a;
+  --badge-ratio:          #ea580c;
+  --badge-flavour:        #d97706;
+  --badge-dietary:        #c2410c;
+  --badge-availability:   #6366f1;
 }
 
 html.dark {
@@ -23,6 +46,29 @@ html.dark {
   --accent:       #818cf8;
   --primary:      #f0efe9;
   --primary-fg:   #111110;
+
+  /* Swap pills — safe (green) */
+  --swap-bg:          rgba(22, 101, 52, 0.15);
+  --swap-fg:          #6ee7a0;
+  --swap-outline:     rgba(22, 101, 52, 0.2);
+  /* Swap pills — swapped state (amber) */
+  --swap-active-bg:   rgba(146, 64, 14, 0.15);
+  --swap-active-fg:   #fbbf24;
+  /* AI notes — dietary (orange) */
+  --note-dietary-bg:      rgba(154, 52, 18, 0.12);
+  --note-dietary-fg:      #fdba74;
+  --note-dietary-outline: rgba(194, 65, 12, 0.2);
+  --note-dietary-badge:   rgba(154, 52, 18, 0.3);
+  /* AI notes — safe (green) */
+  --note-safe-bg:         rgba(22, 101, 52, 0.12);
+  --note-safe-fg:         #6ee7a0;
+  --note-safe-outline:    rgba(22, 101, 52, 0.2);
+  /* Swap type badges */
+  --badge-safe:           #4ade80;
+  --badge-ratio:          #fb923c;
+  --badge-flavour:        #fbbf24;
+  --badge-dietary:        #fdba74;
+  --badge-availability:   #a5b4fc;
 }
 
 body {
@@ -112,6 +158,18 @@ body {
     --primary:    #111111;
     --primary-fg: #ffffff;
     --accent:     #333333;
+    --swap-bg:        #dcfce7;
+    --swap-fg:        #166534;
+    --swap-outline:   rgba(22, 101, 52, 0.05);
+    --swap-active-bg: #fef3c7;
+    --swap-active-fg: #92400e;
+    --note-dietary-bg:      #fff7ed;
+    --note-dietary-fg:      #9a3412;
+    --note-dietary-outline: rgba(194, 65, 12, 0.15);
+    --note-dietary-badge:   #fed7aa;
+    --note-safe-bg:         #dcfce7;
+    --note-safe-fg:         #166534;
+    --note-safe-outline:    rgba(22, 101, 52, 0.05);
   }
 
   body {
