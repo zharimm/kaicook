@@ -184,6 +184,10 @@ ratioChange: multiplier vs original (null if 1:1). note: max 10 words.`,
 export interface SwapResult {
   note: string;
   quantityMultiplier: number | null;
+  /** Steps rewritten by AI with the substitution applied contextually. Only affected steps are returned. */
+  steps?: { index: number; text: string }[];
+  /** Index of the step where the AI note should be displayed (first step where the ingredient is actively used). */
+  noteStepIndex?: number;
 }
 
 export async function swapIngredient(
@@ -194,19 +198,24 @@ export async function swapIngredient(
 ): Promise<SwapResult> {
   const client = getClient();
 
+  // Number steps so the AI can reference them by index
+  const numberedSteps = recipeSteps.map((s, i) => `${i}: ${s}`).join('\n');
+
   const response = await withTimeout(
     client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      system: `You are a cooking assistant. Given an ingredient swap in a recipe, return ONLY a JSON object with:
-{"note": string, "quantityMultiplier": number | null}
+      max_tokens: 1024,
+      system: `You are a cooking assistant. Given an ingredient swap in a recipe, return ONLY a JSON object:
+{"note": string, "quantityMultiplier": number|null, "steps": [{"index": number, "text": string}], "noteStepIndex": number}
 - note: 1-2 sentences on how this swap affects the recipe and any adjustments needed
 - quantityMultiplier: ratio vs original (e.g. 0.75 = use 75%), null if 1:1
+- steps: ONLY steps that mention the ingredient, rewritten with "${substituteName}" replacing "${ingredientName}" contextually. Be smart: "powdered sugar" stays "powdered sugar" if only "sugar" is swapped — only replace where the ingredient is actually used as itself. Keep step text identical except for the swap. Return ONLY changed steps.
+- noteStepIndex: index of the step where the ingredient is first actively used (where the note is most relevant)
 No markdown, no code blocks.`,
       messages: [
         {
           role: 'user',
-          content: `Recipe: "${recipeTitle}"\nSteps: ${recipeSteps.join(' | ')}\n\nSwapping "${ingredientName}" → "${substituteName}". What's the impact?`,
+          content: `Recipe: "${recipeTitle}"\nSteps:\n${numberedSteps}\n\nSwapping "${ingredientName}" → "${substituteName}".`,
         },
       ],
     }),
