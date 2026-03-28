@@ -3,5 +3,8 @@ node_modules/
 .wxt/
 .env
 .env.*
+!.env.example
+.env.local
 .DS_Store
-.claude/settings.local.json
+.claude/
+*.backup
